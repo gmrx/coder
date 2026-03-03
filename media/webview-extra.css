@@ -1,0 +1,30 @@
+.btn-xs {
+  padding: 3px 8px;
+  font-size: 10px;
+}
+
+.save-status {
+  font-size: 11px;
+  opacity: 0.5;
+}
+
+.quick-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.quick-tag {
+  border: 1px solid var(--vscode-editorWidget-border, #3a3a3a);
+  background: var(--vscode-button-secondaryBackground, #2f2f2f);
+  color: var(--vscode-button-secondaryForeground, #ddd);
+  border-radius: 10px;
+  padding: 4px 10px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.quick-tag:hover {
+  filter: brightness(1.08);
+}

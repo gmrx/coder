@@ -1,0 +1,153 @@
+{
+  "name": "coder",
+  "displayName": "Coder",
+  "description": "AI-ассистент для VS Code с агентным циклом и поддержкой любого LLM API.",
+  "version": "0.0.109",
+  "author": "gmrx",
+  "publisher": "gmrx",
+  "license": "SEE LICENSE IN LICENSE",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/gmrx/coder.git"
+  },
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:ai-assistant.ask",
+    "onCommand:ai-assistant.configure",
+    "onView:aiAssistant.chatView"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "ai-assistant.ask",
+        "title": "AI Assistant: Спросить модель"
+      },
+      {
+        "command": "ai-assistant.configure",
+        "title": "AI Assistant: Настроить"
+      },
+      {
+        "command": "ai-assistant.showScmDiff",
+        "title": "Show Diff"
+      },
+      {
+        "command": "ai-assistant.acceptScmFile",
+        "title": "Accept",
+        "icon": "$(check)"
+      },
+      {
+        "command": "ai-assistant.rejectScmFile",
+        "title": "Reject",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "ai-assistant.acceptAllChanges",
+        "title": "Accept All Changes",
+        "icon": "$(check-all)"
+      },
+      {
+        "command": "ai-assistant.rejectAllChanges",
+        "title": "Reject All Changes",
+        "icon": "$(close-all)"
+      }
+    ],
+    "menus": {
+      "scm/resourceState/context": [
+        {
+          "command": "ai-assistant.acceptScmFile",
+          "when": "scmProvider == ai-agent",
+          "group": "inline"
+        },
+        {
+          "command": "ai-assistant.rejectScmFile",
+          "when": "scmProvider == ai-agent",
+          "group": "inline"
+        }
+      ],
+      "scm/title": [
+        {
+          "command": "ai-assistant.acceptAllChanges",
+          "when": "scmProvider == ai-agent",
+          "group": "navigation"
+        },
+        {
+          "command": "ai-assistant.rejectAllChanges",
+          "when": "scmProvider == ai-agent",
+          "group": "navigation"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "aiAssistant",
+          "title": "AI Assistant",
+          "icon": "resources/ai.svg"
+        }
+      ]
+    },
+    "views": {
+      "aiAssistant": [
+        {
+          "id": "aiAssistant.chatView",
+          "name": "Chat",
+          "type": "webview"
+        }
+      ]
+    },
+    "configuration": {
+      "type": "object",
+      "title": "AI Assistant",
+      "properties": {
+        "aiAssistant.apiBaseUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Базовый URL API вашей модели (endpoint)."
+        },
+        "aiAssistant.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "API ключ для доступа к модели.",
+          "markdownDescription": "API ключ для доступа к модели. **Не коммитьте его в git!**"
+        },
+        "aiAssistant.model": {
+          "type": "string",
+          "default": "gpt-4.1-mini",
+          "description": "Имя модели (например, gpt-4.1, gpt-4.1-mini или другая)."
+        },
+        "aiAssistant.embeddingsModel": {
+          "type": "string",
+          "default": "",
+          "description": "Имя модели эмбеддингов (для анализа проекта и поиска по коду). Оставьте пустым, если не используете."
+        },
+        "aiAssistant.rerankModel": {
+          "type": "string",
+          "default": "",
+          "description": "Имя модели rerank (для переупорядочивания файлов/фрагментов под запрос). Оставьте пустым, если не используете."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "clean": "rm -rf dist",
+    "build": "npm run clean && tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "echo \"no lint configured\"",
+    "bump-version": "npm version patch --no-git-tag-version",
+    "package": "npm run bump-version && vsce package"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.75.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0",
+    "vsce": "^2.15.0"
+  }
+}
