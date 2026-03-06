@@ -11,6 +11,8 @@ const MAX_CONSECUTIVE_DUPES = 3;
 const MAX_DIVERSITY_NUDGES = 10;
 const TOOL_CALL_TEMPERATURE = 0.15;
 const FINAL_ANSWER_TEMPERATURE = 0.5;
+const API_STEP_MAX_RETRIES = 4;
+const API_STEP_BASE_DELAY_MS = 2_000;
 
 type AgentMemory = {
   topDirs: Set<string>;
@@ -213,7 +215,7 @@ export async function runAgent(
     for (const toolName of ['scan_structure', 'list_files', 'detect_stack']) {
       onStep?.('agent-auto', `📋 [Авто] ${toolName}...`, { tool: toolName, stage: 'start' });
       try {
-        const result = await executeTool(toolName, {}, lastQuestion, onStep);
+        const result = await executeTool(toolName, {}, lastQuestion, onStep, signal);
         messages.push({ role: 'user', content: `[Авто-контекст: ${toolName}]:\n${truncate(result)}` });
         usedCalls.add(`${toolName}:{}`);
         updateMemory(memory, toolName, {}, result);
@@ -282,12 +284,34 @@ export async function runAgent(
 
     trimContext(messages);
 
-    let response: string;
+    let response: string = '';
+    let apiCallOk = false;
     try {
       response = await sendChatRequest(cfg.apiBaseUrl, cfg.apiKey, cfg.model, messages, { temperature: TOOL_CALL_TEMPERATURE, signal });
+      apiCallOk = true;
     } catch (err: any) {
       if (signal?.aborted) return '⛔ Задача остановлена пользователем.';
-      return `Ошибка API: ${err?.message || err}`;
+      onStep?.('agent-think', `⚠️ Ошибка API на шаге ${iteration}, повтор...`, { step: iteration, error: err?.message });
+      for (let retry = 1; retry <= API_STEP_MAX_RETRIES; retry++) {
+        if (signal?.aborted) return '⛔ Задача остановлена пользователем.';
+        const delay = Math.min(API_STEP_BASE_DELAY_MS * Math.pow(2, retry - 1), 30_000);
+        onStep?.('agent-think', `⏳ Повтор ${retry}/${API_STEP_MAX_RETRIES} через ${Math.round(delay / 1000)}с...`, { step: iteration, retry });
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, delay);
+          signal?.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
+        });
+        if (signal?.aborted) return '⛔ Задача остановлена пользователем.';
+        try {
+          response = await sendChatRequest(cfg.apiBaseUrl, cfg.apiKey, cfg.model, messages, { temperature: TOOL_CALL_TEMPERATURE, signal });
+          apiCallOk = true;
+          onStep?.('agent-think', `✓ Соединение восстановлено на попытке ${retry}`, { step: iteration, retry });
+          break;
+        } catch (retryErr: any) {
+          if (signal?.aborted) return '⛔ Задача остановлена пользователем.';
+          onStep?.('agent-think', `⚠️ Попытка ${retry} не удалась: ${retryErr?.message || retryErr}`, { step: iteration, retry });
+        }
+      }
+      if (!apiCallOk) return `Ошибка API: ${err?.message || err}`;
     }
 
     const { action } = parseAgentAction(response);
@@ -353,16 +377,25 @@ export async function runAgent(
               : 'Если есть архитектурные связи/потоки, добавь Mermaid-диаграммы в блоках ```mermaid```.\n') +
             'НЕ выводи JSON, только структурированный markdown по-русски.'
         });
-        try {
+        for (let fb = 0; fb <= API_STEP_MAX_RETRIES; fb++) {
           if (signal?.aborted) return '⛔ Задача остановлена пользователем.';
-          return cleanupFinalAnswer(
-            await sendChatRequest(cfg.apiBaseUrl, cfg.apiKey, cfg.model, messages, { temperature: FINAL_ANSWER_TEMPERATURE, signal }),
-            needMermaid
-          );
-        } catch (err: any) {
-          if (signal?.aborted) return '⛔ Задача остановлена пользователем.';
-          return `Ошибка API: ${err?.message || err}`;
+          try {
+            return cleanupFinalAnswer(
+              await sendChatRequest(cfg.apiBaseUrl, cfg.apiKey, cfg.model, messages, { temperature: FINAL_ANSWER_TEMPERATURE, signal }),
+              needMermaid
+            );
+          } catch (err: any) {
+            if (signal?.aborted) return '⛔ Задача остановлена пользователем.';
+            if (fb >= API_STEP_MAX_RETRIES) return `Ошибка API: ${err?.message || err}`;
+            const delay = Math.min(API_STEP_BASE_DELAY_MS * Math.pow(2, fb), 30_000);
+            onStep?.('agent-think', `⚠️ Повтор ${fb + 1}/${API_STEP_MAX_RETRIES} через ${Math.round(delay / 1000)}с...`, { step: iteration, retry: fb + 1 });
+            await new Promise<void>((resolve) => {
+              const timer = setTimeout(resolve, delay);
+              signal?.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
+            });
+          }
         }
+        return 'Ошибка API: не удалось сформировать ответ после нескольких попыток.';
       }
       return 'Не удалось распарсить корректный JSON-вызов утилиты после нескольких попыток. Сформулируй запрос иначе или сузь задачу.';
     }
@@ -407,16 +440,25 @@ export async function runAgent(
           'НЕ выводи JSON. По-русски.'
       });
       onStep?.('agent-answer', '📝 Формирую ответ...', { step: iteration });
-      try {
+      for (let fa = 0; fa <= API_STEP_MAX_RETRIES; fa++) {
         if (signal?.aborted) return '⛔ Задача остановлена пользователем.';
-        return cleanupFinalAnswer(
-          await sendChatRequest(cfg.apiBaseUrl, cfg.apiKey, cfg.model, messages, { temperature: FINAL_ANSWER_TEMPERATURE, signal }),
-          needMermaid
-        );
-      } catch (err: any) {
-        if (signal?.aborted) return '⛔ Задача остановлена пользователем.';
-        return `Ошибка API: ${err?.message || err}`;
+        try {
+          return cleanupFinalAnswer(
+            await sendChatRequest(cfg.apiBaseUrl, cfg.apiKey, cfg.model, messages, { temperature: FINAL_ANSWER_TEMPERATURE, signal }),
+            needMermaid
+          );
+        } catch (err: any) {
+          if (signal?.aborted) return '⛔ Задача остановлена пользователем.';
+          if (fa >= API_STEP_MAX_RETRIES) return `Ошибка API: ${err?.message || err}`;
+          const delay = Math.min(API_STEP_BASE_DELAY_MS * Math.pow(2, fa), 30_000);
+          onStep?.('agent-think', `⚠️ Ошибка при формировании ответа, повтор ${fa + 1}/${API_STEP_MAX_RETRIES} через ${Math.round(delay / 1000)}с...`, { step: iteration, retry: fa + 1 });
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, delay);
+            signal?.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
+          });
+        }
       }
+      return 'Ошибка API: не удалось сформировать ответ после нескольких попыток.';
     }
 
     if (
@@ -465,7 +507,7 @@ export async function runAgent(
     lastToolReasoning = action.reasoning || null;
 
     let result: string;
-    try { result = await executeTool(action.tool, action.args || {}, lastQuestion, onStep); }
+    try { result = await executeTool(action.tool, action.args || {}, lastQuestion, onStep, signal); }
     catch (err: any) { result = `Ошибка: ${err?.message || err}`; }
 
     onStep?.('agent-result', `✓ [${action.tool}] → ${result.split('\n').length} строк`, {
@@ -516,13 +558,23 @@ export async function runAgent(
       'Отвечай ТОЛЬКО на этот запрос. Не включай информацию из предыдущих сообщений, если она не относится к нему.\n' +
       'НЕ JSON. Markdown. По-русски.'
   });
-  try {
-    return cleanupFinalAnswer(
-      await sendChatRequest(cfg.apiBaseUrl, cfg.apiKey, cfg.model, messages, { temperature: FINAL_ANSWER_TEMPERATURE, signal }),
-      needMermaid
-    );
-  } catch (err: any) {
+  for (let fin = 0; fin <= API_STEP_MAX_RETRIES; fin++) {
     if (signal?.aborted) return '⛔ Задача остановлена пользователем.';
-    return `Ошибка API: ${err?.message || err}`;
+    try {
+      return cleanupFinalAnswer(
+        await sendChatRequest(cfg.apiBaseUrl, cfg.apiKey, cfg.model, messages, { temperature: FINAL_ANSWER_TEMPERATURE, signal }),
+        needMermaid
+      );
+    } catch (err: any) {
+      if (signal?.aborted) return '⛔ Задача остановлена пользователем.';
+      if (fin >= API_STEP_MAX_RETRIES) return `Ошибка API: ${err?.message || err}`;
+      const delay = Math.min(API_STEP_BASE_DELAY_MS * Math.pow(2, fin), 30_000);
+      onStep?.('agent-think', `⚠️ Повтор ${fin + 1}/${API_STEP_MAX_RETRIES} через ${Math.round(delay / 1000)}с...`, { step: iteration, retry: fin + 1 });
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, delay);
+        signal?.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
+      });
+    }
   }
+  return 'Ошибка API: не удалось сформировать ответ после нескольких попыток.';
 }

@@ -1,0 +1,292 @@
+/* ================================================================
+   Mermaid Diagram Styles
+   ================================================================
+   Container & UI styles only. SVG internals are fixed via JS
+   post-processing in MermaidRenderer.fixSvg() because Mermaid v11
+   hard-codes inline styles that CSS cannot reliably override.
+   ================================================================ */
+
+/* ── Wrapper ── */
+.mmd-wrapper {
+  margin: 10px 0;
+  border: 1px solid var(--vscode-panel-border, rgba(255, 255, 255, 0.12));
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--vscode-editor-background, #1e1e1e);
+}
+
+/* ── Toolbar ── */
+.mmd-toolbar {
+  display: flex;
+  align-items: center;
+  padding: 6px 10px;
+  gap: 8px;
+  background: var(--vscode-sideBarSectionHeader-background, rgba(255, 255, 255, 0.04));
+  border-bottom: 1px solid var(--vscode-panel-border, rgba(255, 255, 255, 0.08));
+}
+.mmd-toolbar-label {
+  flex: 1;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  opacity: 0.75;
+  white-space: nowrap;
+}
+.mmd-toolbar-actions {
+  display: flex;
+  gap: 2px;
+}
+.mmd-icon-btn {
+  background: transparent;
+  border: none;
+  color: var(--vscode-foreground);
+  cursor: pointer;
+  padding: 3px 6px;
+  border-radius: 4px;
+  font-size: 14px;
+  opacity: 0.55;
+  transition: opacity 0.15s, background 0.15s;
+  line-height: 1;
+}
+.mmd-icon-btn:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+/* ── Rendered Diagram Container ── */
+.mmd-rendered {
+  padding: 20px 16px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  overflow: auto;
+  max-height: 520px;
+  min-height: 100px;
+  background: var(--vscode-editor-background, #1e1e1e);
+  cursor: zoom-in;
+}
+
+.mmd-rendered svg {
+  width: 100%;
+  height: auto;
+  max-width: 100%;
+}
+
+/* Hover effect on nodes */
+.mmd-rendered .node rect,
+.mmd-rendered .node circle,
+.mmd-rendered .node polygon {
+  transition: filter 0.15s ease;
+}
+.mmd-rendered .node:hover rect,
+.mmd-rendered .node:hover circle,
+.mmd-rendered .node:hover polygon {
+  filter: brightness(1.15);
+}
+
+/* ── Scrollbar ── */
+.mmd-rendered::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.mmd-rendered::-webkit-scrollbar-thumb {
+  background: rgba(127, 127, 127, 0.35);
+  border-radius: 999px;
+}
+.mmd-rendered::-webkit-scrollbar-thumb:hover {
+  background: rgba(127, 127, 127, 0.55);
+}
+
+/* ── Collapsible Source View ── */
+.mmd-source {
+  border-top: 1px solid var(--vscode-panel-border, rgba(255, 255, 255, 0.08));
+}
+.mmd-source pre {
+  margin: 0 !important;
+  border: none !important;
+  border-radius: 0 !important;
+  background: var(--vscode-textCodeBlock-background, #1e1e2e) !important;
+}
+.mmd-source pre code {
+  display: block;
+  padding: 12px 14px;
+  font-family: var(--vscode-editor-font-family, 'Menlo', 'Monaco', 'Courier New', monospace);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre;
+  overflow-x: auto;
+  color: var(--vscode-editor-foreground, #d4d4d4);
+}
+
+/* ================================================================
+   Error Fallback
+   ================================================================ */
+.mmd-error-wrap {
+  margin: 10px 0;
+  border: 1px solid var(--vscode-inputValidation-errorBorder, #be1100);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--vscode-editor-background, #1e1e1e);
+}
+.mmd-error-title {
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  background: rgba(190, 17, 0, 0.14);
+  color: var(--vscode-errorForeground, #f48771);
+  border-bottom: 1px solid var(--vscode-inputValidation-errorBorder, #be1100);
+}
+.mmd-error-message {
+  padding: 8px 12px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--vscode-errorForeground, #f48771);
+  background: var(--vscode-inputValidation-errorBackground, rgba(90, 29, 29, 0.2));
+}
+.mmd-error-source {
+  border-top: 1px solid var(--vscode-panel-border, rgba(255, 255, 255, 0.1));
+}
+.mmd-error-source > summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 8px 12px;
+  font-size: 11px;
+  opacity: 0.78;
+  user-select: none;
+}
+.mmd-error-source > summary:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.04);
+}
+.mmd-error-source pre {
+  margin: 0 !important;
+  border: none !important;
+  border-radius: 0 !important;
+}
+.mmd-error-source pre code {
+  display: block;
+  padding: 10px 14px;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre;
+  overflow-x: auto;
+  color: var(--vscode-editor-foreground, #ccc);
+}
+
+/* ================================================================
+   Fullscreen Overlay
+   ================================================================ */
+.mermaid-overlay {
+  display: none;
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  z-index: 10000;
+  background: color-mix(in srgb, var(--vscode-editor-background, #1e1e1e) 92%, black 8%);
+  flex-direction: column;
+  backdrop-filter: blur(2px);
+}
+.mermaid-overlay.open {
+  display: flex;
+}
+
+.mermaid-overlay-toolbar {
+  padding: 8px 14px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid var(--vscode-panel-border, rgba(255, 255, 255, 0.1));
+  flex-shrink: 0;
+  background: var(--vscode-sideBarSectionHeader-background, rgba(255, 255, 255, 0.04));
+}
+.mermaid-overlay-title {
+  font-size: 12px;
+  font-weight: 500;
+  opacity: 0.7;
+}
+.mermaid-overlay-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.mermaid-overlay-content {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 24px;
+  cursor: grab;
+  user-select: none;
+}
+.mermaid-overlay-content:active {
+  cursor: grabbing;
+}
+.mermaid-overlay-inner {
+  transform-origin: center center;
+  transition: transform 0.1s ease;
+}
+.mermaid-overlay-content svg {
+  max-width: none;
+  max-height: none;
+}
+
+/* ── Overlay scrollbar ── */
+.mermaid-overlay-content::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+.mermaid-overlay-content::-webkit-scrollbar-thumb {
+  background: rgba(127, 127, 127, 0.4);
+  border-radius: 999px;
+}
+.mermaid-overlay-content::-webkit-scrollbar-thumb:hover {
+  background: rgba(127, 127, 127, 0.6);
+}
+
+/* ── Zoom Controls ── */
+.zoom-controls {
+  position: fixed;
+  bottom: 16px;
+  right: 16px;
+  display: none;
+  gap: 4px;
+  z-index: 10001;
+}
+.mermaid-overlay.open .zoom-controls {
+  display: flex;
+}
+.zoom-btn {
+  width: 34px;
+  height: 34px;
+  border-radius: 6px;
+  border: 1px solid var(--vscode-panel-border, rgba(255, 255, 255, 0.15));
+  background: var(--vscode-editor-background, #1e1e1e);
+  color: var(--vscode-foreground);
+  font-size: 16px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, border-color 0.15s;
+}
+.zoom-btn:hover {
+  background: var(--vscode-button-secondaryBackground, rgba(255, 255, 255, 0.1));
+  border-color: var(--vscode-focusBorder, rgba(255, 255, 255, 0.25));
+}
+.zoom-level {
+  height: 34px;
+  padding: 0 10px;
+  border-radius: 6px;
+  border: 1px solid var(--vscode-panel-border, rgba(255, 255, 255, 0.15));
+  background: var(--vscode-editor-background, #1e1e1e);
+  color: var(--vscode-foreground);
+  font-size: 11px;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 52px;
+  user-select: none;
+}

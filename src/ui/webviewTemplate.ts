@@ -3,6 +3,11 @@ import * as vscode from 'vscode';
 export function getChatViewHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
   const baseStyleUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', 'webview.css'));
   const extraStyleUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', 'webview-extra.css'));
+  const mermaidCssUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', 'mermaid', 'mermaid.css'));
+  const mermaidConfigUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', 'mermaid', 'MermaidConfig.js'));
+  const mermaidRendererUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', 'mermaid', 'MermaidRenderer.js'));
+  const mermaidOverlayUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', 'mermaid', 'MermaidOverlay.js'));
+  const mermaidManagerUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', 'mermaid', 'MermaidManager.js'));
   const markdownJsUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', 'chat-markdown.js'));
   const appJsUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', 'chat-app.js'));
 
@@ -14,6 +19,7 @@ export function getChatViewHtml(webview: vscode.Webview, extensionUri: vscode.Ur
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <link rel="stylesheet" href="${baseStyleUri}" />
   <link rel="stylesheet" href="${extraStyleUri}" />
+  <link rel="stylesheet" href="${mermaidCssUri}" />
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark-dimmed.min.css" />
   <title>AI Assistant</title>
 </head>
@@ -89,6 +95,10 @@ export function getChatViewHtml(webview: vscode.Webview, extensionUri: vscode.Ur
   <script src="https://cdn.jsdelivr.net/npm/markdown-it@14/dist/markdown-it.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/build/highlight.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <script src="${mermaidConfigUri}"></script>
+  <script src="${mermaidRendererUri}"></script>
+  <script src="${mermaidOverlayUri}"></script>
+  <script src="${mermaidManagerUri}"></script>
   <script src="${markdownJsUri}"></script>
   <script src="${appJsUri}"></script>
 </body>

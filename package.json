@@ -2,7 +2,7 @@
   "name": "coder",
   "displayName": "Coder",
   "description": "AI-ассистент для VS Code с агентным циклом и поддержкой любого LLM API.",
-  "version": "0.0.109",
+  "version": "0.0.115",
   "author": "gmrx",
   "publisher": "gmrx",
   "license": "SEE LICENSE IN LICENSE",

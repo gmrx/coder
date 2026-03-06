@@ -10,6 +10,36 @@ import { parseAgentAction, stripJsonBlocks } from './prompt';
 type ToolEventCallback = (phase: string, message: string, meta?: any) => void | Promise<any>;
 let SUBAGENT_SEQ = 0;
 
+const SUBAGENT_STEP_MAX_RETRIES = 3;
+const SUBAGENT_STEP_BASE_DELAY_MS = 2_000;
+
+async function sendChatWithStepRetry(
+  apiBaseUrl: string, apiKey: string, model: string,
+  messages: { role: 'system' | 'user' | 'assistant'; content: string }[],
+  opts: { temperature: number; signal?: AbortSignal },
+  id: string,
+  onEvent?: ToolEventCallback
+): Promise<string> {
+  let lastErr: any;
+  for (let attempt = 0; attempt <= SUBAGENT_STEP_MAX_RETRIES; attempt++) {
+    if (opts.signal?.aborted) throw new Error('⛔ Задача остановлена пользователем.');
+    try {
+      return await sendChatRequest(apiBaseUrl, apiKey, model, messages, opts);
+    } catch (e: any) {
+      lastErr = e;
+      if (opts.signal?.aborted) throw e;
+      if (attempt >= SUBAGENT_STEP_MAX_RETRIES) throw e;
+      const delay = Math.min(SUBAGENT_STEP_BASE_DELAY_MS * Math.pow(2, attempt), 20_000);
+      onEvent?.('subagent-step', `⚠️ [Subagent ${id}] API ошибка, повтор ${attempt + 1}/${SUBAGENT_STEP_MAX_RETRIES} через ${Math.round(delay / 1000)}с...`, { id, retry: attempt + 1 });
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, delay);
+        opts.signal?.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
+      });
+    }
+  }
+  throw lastErr;
+}
+
 async function resolveWorkspaceUri(filePath: string): Promise<vscode.Uri | null> {
   const folders = vscode.workspace.workspaceFolders;
   if (!folders?.length || !filePath) return null;
@@ -183,7 +213,7 @@ function validateSubagentToolArgs(tool: string, args: any): string | null {
   }
 }
 
-async function runSubagentSingle(args: any, parentQuery?: string, onEvent?: ToolEventCallback): Promise<string> {
+async function runSubagentSingle(args: any, parentQuery?: string, onEvent?: ToolEventCallback, signal?: AbortSignal): Promise<string> {
   const task = (args?.prompt || args?.task || args?.query || '').toString().trim();
   if (!task) return '(subagent) укажи "prompt" (или "task").';
 
@@ -240,7 +270,7 @@ async function runSubagentSingle(args: any, parentQuery?: string, onEvent?: Tool
     onEvent?.('subagent-step', `🧠 [Subagent ${id}] Шаг ${step}`, { id, step });
     let llm: string;
     try {
-      llm = await sendChatRequest(cfg.apiBaseUrl, cfg.apiKey, cfg.model, messages, { temperature: 0.15 });
+      llm = await sendChatWithStepRetry(cfg.apiBaseUrl, cfg.apiKey, cfg.model, messages, { temperature: 0.15, signal }, id, onEvent);
     } catch (e: any) {
       onEvent?.('subagent-error', `✗ [Subagent ${id}] Ошибка API: ${e?.message || e}`, { id, error: e?.message || String(e) });
       return `(subagent) Ошибка API: ${e?.message || e}`;
@@ -276,7 +306,7 @@ async function runSubagentSingle(args: any, parentQuery?: string, onEvent?: Tool
         content: 'Сформируй финальный ответ в markdown (без JSON), кратко и по фактам.'
       });
       try {
-        const done = stripJsonBlocks(await sendChatRequest(cfg.apiBaseUrl, cfg.apiKey, cfg.model, messages, { temperature: 0.4 }));
+        const done = stripJsonBlocks(await sendChatWithStepRetry(cfg.apiBaseUrl, cfg.apiKey, cfg.model, messages, { temperature: 0.4, signal }, id, onEvent));
         onEvent?.('subagent-done', `✓ [Subagent ${id}] Завершён`, { id, summary: done });
         return done;
       } catch (e: any) {
@@ -331,7 +361,7 @@ async function runSubagentSingle(args: any, parentQuery?: string, onEvent?: Tool
       id, tool: action.tool, args: action.args || {}, reasoning: action.reasoning || ''
     });
     try {
-      toolResult = await executeTool(action.tool, action.args || {}, task, onEvent);
+      toolResult = await executeTool(action.tool, action.args || {}, task, onEvent, signal);
     } catch (e: any) {
       toolResult = `Ошибка инструмента ${action.tool}: ${e?.message || e}`;
     }
@@ -344,7 +374,7 @@ async function runSubagentSingle(args: any, parentQuery?: string, onEvent?: Tool
 
 }
 
-async function runSubagent(args: any, parentQuery?: string, onEvent?: ToolEventCallback): Promise<string> {
+async function runSubagent(args: any, parentQuery?: string, onEvent?: ToolEventCallback, signal?: AbortSignal): Promise<string> {
   interface NormalizedTask {
     prompt?: string;
     action?: string;
@@ -358,8 +388,7 @@ async function runSubagent(args: any, parentQuery?: string, onEvent?: ToolEventC
   const tasks = Array.isArray(args?.tasks) ? args.tasks : [];
   const runParallel = args?.parallel === true;
 
-  // Single subagent mode (backward compatible).
-  if (!tasks.length) return runSubagentSingle(args, parentQuery, onEvent);
+  if (!tasks.length) return runSubagentSingle(args, parentQuery, onEvent, signal);
 
   const normalized: NormalizedTask[] = tasks
     .map((t: any, idx: number) => {
@@ -495,7 +524,7 @@ async function runSubagent(args: any, parentQuery?: string, onEvent?: ToolEventC
         return { label: t.label, result: fallback };
       }
       try {
-        const summary = await sendChatRequest(cfg.apiBaseUrl, cfg.apiKey, cfg.model, [
+        const summary = await sendChatWithStepRetry(cfg.apiBaseUrl, cfg.apiKey, cfg.model, [
           {
             role: 'system',
             content:
@@ -509,7 +538,7 @@ async function runSubagent(args: any, parentQuery?: string, onEvent?: ToolEventC
               `Материалы:\n${snippets.join('\n\n')}\n\n` +
               'Сформируй структурированный итог (ключевые факты, выводы, риски, что проверить).'
           }
-        ], { temperature: 0.2 });
+        ], { temperature: 0.2, signal }, t.label, onEvent);
         const done = stripJsonBlocks(summary);
         onEvent?.('subagent-done', `✓ [Subagent ${t.label}] Завершён`, { id: t.label, summary: truncate(done, 400) });
         return { label: t.label, result: done };
@@ -525,7 +554,7 @@ async function runSubagent(args: any, parentQuery?: string, onEvent?: ToolEventC
       prompt: t.prompt,
       subagent_type: t.subagent_type,
       readonly: t.readonly
-    }, parentQuery, onEvent);
+    }, parentQuery, onEvent, signal);
     return { label: t.label, result };
   };
 
@@ -549,7 +578,7 @@ async function runSubagent(args: any, parentQuery?: string, onEvent?: ToolEventC
   return lines.join('\n').trim();
 }
 
-export async function executeTool(toolName: string, args: any, query?: string, onEvent?: ToolEventCallback): Promise<string> {
+export async function executeTool(toolName: string, args: any, query?: string, onEvent?: ToolEventCallback, signal?: AbortSignal): Promise<string> {
   switch (toolName) {
     case 'scan_structure': {
       const overviews = await scanWorkspaceStructure();
@@ -862,7 +891,7 @@ export async function executeTool(toolName: string, args: any, query?: string, o
     }
 
     case 'subagent': {
-      return await runSubagent(args || {}, query, onEvent);
+      return await runSubagent(args || {}, query, onEvent, signal);
     }
 
     case 'get_diagnostics': {
