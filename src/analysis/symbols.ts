@@ -1,11 +1,12 @@
 import * as vscode from 'vscode';
 import { FileSymbolOutline, ImportInfo, DependencyEdge } from '../core/types';
 import { decoder } from '../core/utils';
+import { toAgentRelativePath } from '../agent/worktreeSession';
 
 const MAX_SYMBOLS_PER_FILE = 60;
 
 export async function extractDocumentSymbols(uri: vscode.Uri): Promise<FileSymbolOutline> {
-  const rel = vscode.workspace.asRelativePath(uri, false);
+  const rel = toAgentRelativePath(uri);
   try {
     const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>('vscode.executeDocumentSymbolProvider', uri);
     if (symbols && symbols.length > 0) {
@@ -67,7 +68,7 @@ async function extractImports(uri: vscode.Uri): Promise<ImportInfo[]> {
   const results: ImportInfo[] = [];
   try {
     const lines = decoder.decode(await vscode.workspace.fs.readFile(uri)).split('\n');
-    const rel = vscode.workspace.asRelativePath(uri, false);
+    const rel = toAgentRelativePath(uri);
     const patterns: { re: RegExp; getTarget: (m: RegExpExecArray) => string; checkRelative?: (t: string) => boolean }[] = [
       { re: /import\s+.*?\s+from\s+['"]([^'"]+)['"]/, getTarget: m => m[1] },
       { re: /import\s+['"]([^'"]+)['"]/, getTarget: m => m[1] },
@@ -90,7 +91,7 @@ async function extractImports(uri: vscode.Uri): Promise<ImportInfo[]> {
 
 export async function buildDependencyGraph(fileUris: vscode.Uri[]): Promise<DependencyEdge[]> {
   const edges: DependencyEdge[] = [];
-  const projectFiles = new Set(fileUris.map(u => vscode.workspace.asRelativePath(u, false)));
+  const projectFiles = new Set(fileUris.map(u => toAgentRelativePath(u)));
   const basenameToPath = new Map<string, string>();
   for (const f of projectFiles) {
     const parts = f.split(/[\\/]/);
@@ -100,7 +101,7 @@ export async function buildDependencyGraph(fileUris: vscode.Uri[]): Promise<Depe
   const seen = new Set<string>();
   for (const uri of fileUris) {
     const imports = await extractImports(uri);
-    const source = vscode.workspace.asRelativePath(uri, false);
+    const source = toAgentRelativePath(uri);
     for (const imp of imports) {
       let resolved: string | null = null;
       if (imp.target.startsWith('.') || imp.target.startsWith('/')) {

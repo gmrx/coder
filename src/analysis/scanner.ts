@@ -1,17 +1,18 @@
 import * as vscode from 'vscode';
 import { ProjectStructureOverview, EntrypointsInfo } from '../core/types';
 import { IGNORE_PATTERN } from '../core/constants';
+import { getAgentWorkspaceFolder, toAgentRelativePath } from '../agent/worktreeSession';
 
 export async function scanWorkspaceStructure(): Promise<ProjectStructureOverview[]> {
-  const folders = vscode.workspace.workspaceFolders;
-  if (!folders) return [];
+  const folder = getAgentWorkspaceFolder();
+  if (!folder) return [];
 
   const results: ProjectStructureOverview[] = [];
-  for (const folder of folders) {
+  {
     const allFiles = await vscode.workspace.findFiles(
-      new vscode.RelativePattern(folder, '**/*'), IGNORE_PATTERN, 5000
+      new vscode.RelativePattern(folder, '**/*'), IGNORE_PATTERN, 5000,
     );
-    const relPaths = allFiles.map(f => vscode.workspace.asRelativePath(f, false));
+    const relPaths = allFiles.map((f) => toAgentRelativePath(f));
 
     const dirCount = new Map<string, number>();
     const importantFiles: string[] = [];
@@ -38,13 +39,11 @@ export async function scanWorkspaceStructure(): Promise<ProjectStructureOverview
 }
 
 export async function listAllProjectFiles(): Promise<{ root: string; files: string[] }[]> {
-  const folders = vscode.workspace.workspaceFolders;
-  if (!folders) return [];
+  const folder = getAgentWorkspaceFolder();
+  if (!folder) return [];
   const result: { root: string; files: string[] }[] = [];
-  for (const folder of folders) {
-    const found = await vscode.workspace.findFiles(new vscode.RelativePattern(folder, '**/*'), IGNORE_PATTERN, 5000);
-    result.push({ root: folder.name, files: found.map(f => vscode.workspace.asRelativePath(f, false)).sort() });
-  }
+  const found = await vscode.workspace.findFiles(new vscode.RelativePattern(folder, '**/*'), IGNORE_PATTERN, 5000);
+  result.push({ root: folder.name, files: found.map((f) => toAgentRelativePath(f)).sort() });
   return result;
 }
 
@@ -58,7 +57,11 @@ export async function detectStackAndEntrypoints(): Promise<EntrypointsInfo> {
     ['**/Cargo.toml', 'Rust'], ['**/go.mod', 'Go'], ['**/pom.xml', 'Java'], ['**/build.gradle', 'Java'],
   ];
   for (const [glob, lang] of checks) {
-    if ((await vscode.workspace.findFiles(glob, IGNORE_PATTERN, 1)).length > 0 && !languageGuesses.includes(lang)) {
+    const folder = getAgentWorkspaceFolder();
+    const matches = folder
+      ? await vscode.workspace.findFiles(new vscode.RelativePattern(folder, glob.replace(/^\*\*\//, '')), IGNORE_PATTERN, 1)
+      : [];
+    if (matches.length > 0 && !languageGuesses.includes(lang)) {
       languageGuesses.push(lang);
     }
   }
@@ -69,8 +72,10 @@ export async function detectStackAndEntrypoints(): Promise<EntrypointsInfo> {
     '**/App.tsx', '**/App.ts', '**/App.vue', '**/App.svelte', '**/server.ts', '**/server.js',
   ];
   for (const pat of entryPatterns) {
-    for (const f of await vscode.workspace.findFiles(pat, IGNORE_PATTERN, 3)) {
-      const rel = vscode.workspace.asRelativePath(f, false);
+    const folder = getAgentWorkspaceFolder();
+    if (!folder) continue;
+    for (const f of await vscode.workspace.findFiles(new vscode.RelativePattern(folder, pat.replace(/^\*\*\//, '')), IGNORE_PATTERN, 3)) {
+      const rel = toAgentRelativePath(f);
       if (!entryFiles.includes(rel)) entryFiles.push(rel);
     }
   }

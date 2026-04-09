@@ -1,9 +1,9 @@
 {
   "name": "coder",
-  "displayName": "Coder",
-  "description": "AI-ассистент для VS Code с агентным циклом и поддержкой любого LLM API.",
-  "version": "0.0.115",
-  "author": "gmrx",
+  "displayName": "ИИ Кодогенератор",
+  "description": "ИИ-кодогенератор для VS Code с агентным циклом и поддержкой любого LLM API.",
+  "version": "0.0.226",
+  "author": "Мартин Газов (gmrx)",
   "publisher": "gmrx",
   "license": "SEE LICENSE IN LICENSE",
   "repository": {
@@ -27,34 +27,34 @@
     "commands": [
       {
         "command": "ai-assistant.ask",
-        "title": "AI Assistant: Спросить модель"
+        "title": "ИИ Кодогенератор: Спросить модель"
       },
       {
         "command": "ai-assistant.configure",
-        "title": "AI Assistant: Настроить"
+        "title": "ИИ Кодогенератор: Открыть настройки"
       },
       {
         "command": "ai-assistant.showScmDiff",
-        "title": "Show Diff"
+        "title": "Показать diff"
       },
       {
         "command": "ai-assistant.acceptScmFile",
-        "title": "Accept",
+        "title": "Принять",
         "icon": "$(check)"
       },
       {
         "command": "ai-assistant.rejectScmFile",
-        "title": "Reject",
+        "title": "Отклонить",
         "icon": "$(discard)"
       },
       {
         "command": "ai-assistant.acceptAllChanges",
-        "title": "Accept All Changes",
+        "title": "Принять все изменения",
         "icon": "$(check-all)"
       },
       {
         "command": "ai-assistant.rejectAllChanges",
-        "title": "Reject All Changes",
+        "title": "Отклонить все изменения",
         "icon": "$(close-all)"
       }
     ],
@@ -88,7 +88,7 @@
       "activitybar": [
         {
           "id": "aiAssistant",
-          "title": "AI Assistant",
+          "title": "ИИ Кодогенератор",
           "icon": "resources/ai.svg"
         }
       ]
@@ -97,14 +97,14 @@
       "aiAssistant": [
         {
           "id": "aiAssistant.chatView",
-          "name": "Chat",
+          "name": "Диалог",
           "type": "webview"
         }
       ]
     },
     "configuration": {
       "type": "object",
-      "title": "AI Assistant",
+      "title": "ИИ Кодогенератор",
       "properties": {
         "aiAssistant.apiBaseUrl": {
           "type": "string",
@@ -131,6 +131,66 @@
           "type": "string",
           "default": "",
           "description": "Имя модели rerank (для переупорядочивания файлов/фрагментов под запрос). Оставьте пустым, если не используете."
+        },
+        "aiAssistant.systemPrompt": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Дополнительные постоянные инструкции для агента. Этот текст подмешивается в системный prompt и задаёт стиль работы, ограничения и предпочтения."
+        },
+        "aiAssistant.mcpConfigPath": {
+          "type": "string",
+          "default": "",
+          "description": "Необязательный путь к MCP config JSON. Если пусто, расширение ищет .mcp.json и .cursor/mcp.json в корне workspace."
+        },
+        "aiAssistant.mcpServers": {
+          "type": "object",
+          "default": {},
+          "markdownDescription": "Необязательная карта MCP серверов. Формат совместим с `mcpServers` в `.mcp.json`. Сейчас поддерживаются `stdio` и `http`."
+        },
+        "aiAssistant.mcpDisabledTools": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "markdownDescription": "Список выключенных MCP tools в формате `server::toolName`. Выключенные tools не предлагаются агенту и не могут быть вызваны через `mcp_tool`."
+        },
+        "aiAssistant.mcpTrustedTools": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "markdownDescription": "Список MCP tools в формате `server::toolName`, которые разрешено вызывать без отдельного подтверждения."
+        },
+        "aiAssistant.autoApproval": {
+          "type": "object",
+          "default": {
+            "fileCreate": true,
+            "fileEdit": true,
+            "fileDelete": true,
+            "webFetch": false,
+            "shell": false,
+            "worktree": false,
+            "mcp": false
+          },
+          "markdownDescription": "Настройки авторазрешения действий агента. По умолчанию разрешены `fileCreate`, `fileEdit`, `fileDelete`, а `webFetch`, `shell`, `worktree` и `mcp` остаются выключены."
+        },
+        "aiAssistant.webTrustedHosts": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "markdownDescription": "Хосты, для которых `web_fetch` можно выполнять без дополнительного подтверждения. Указывайте только домены, например `example.com`."
+        },
+        "aiAssistant.webBlockedHosts": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "markdownDescription": "Хосты, которые `web_fetch` всегда блокирует, даже если агент попытается открыть их автоматически."
         }
       }
     }
@@ -145,10 +205,15 @@
     "package": "npm run bump-version && vsce package"
   },
   "devDependencies": {
-    "@types/vscode": "^1.75.0",
     "@types/node": "^20.0.0",
+    "@types/vscode": "^1.75.0",
     "typescript": "^5.0.0",
     "vsce": "^2.15.0"
+  },
+  "dependencies": {
+    "highlight.js": "^11.11.1",
+    "markdown-it": "^14.1.1",
+    "mermaid": "^11.13.0"
   },
   "overrides": {
     "xml2js": ">=0.5.0"

@@ -1,927 +1,1147 @@
 import * as vscode from 'vscode';
-import { ChatMessage } from '../core/types';
-import { readConfig, fetchModelsList, saveConfig, sendChatRequest } from '../core/api';
-import { isConfigValid } from '../core/utils';
+import * as fs from 'fs/promises';
+import { readConfig, saveConfig } from '../core/api';
 import { EXTENSION_NAME } from '../core/constants';
-import { runAgent } from '../agent';
-import { getChatViewHtml } from './webviewTemplate';
-
-interface DiffLine {
-  type: 'context' | 'add' | 'del' | 'sep' | 'hunk';
-  text: string;
-  oldNo?: number;
-  newNo?: number;
-}
-
-function computeUnifiedDiff(oldText: string, newText: string, ctx = 3): DiffLine[] {
-  if (oldText === newText) return [];
-  if (!oldText && !newText) return [];
-
-  if (!oldText) {
-    const lines = newText.split('\n');
-    if (lines.length > 300) return lines.slice(0, 300).map((l, i) => ({ type: 'add' as const, text: l, newNo: i + 1 }));
-    return lines.map((l, i) => ({ type: 'add' as const, text: l, newNo: i + 1 }));
-  }
-  if (!newText) {
-    const lines = oldText.split('\n');
-    if (lines.length > 300) return lines.slice(0, 300).map((l, i) => ({ type: 'del' as const, text: l, oldNo: i + 1 }));
-    return lines.map((l, i) => ({ type: 'del' as const, text: l, oldNo: i + 1 }));
-  }
-
-  const oldL = oldText.split('\n');
-  const newL = newText.split('\n');
-  const m = oldL.length, n = newL.length;
-
-  if (m > 2000 || n > 2000) return [];
-
-  const dp: number[][] = [];
-  for (let i = 0; i <= m; i++) {
-    dp[i] = new Array(n + 1).fill(0);
-  }
-  for (let i = 1; i <= m; i++) {
-    for (let j = 1; j <= n; j++) {
-      dp[i][j] = oldL[i - 1] === newL[j - 1] ? dp[i - 1][j - 1] + 1 : Math.max(dp[i - 1][j], dp[i][j - 1]);
-    }
-  }
-
-  const ops: Array<{ t: 'ctx' | 'del' | 'add'; s: string; o?: number; n?: number }> = [];
-  let i = m, j = n;
-  while (i > 0 || j > 0) {
-    if (i > 0 && j > 0 && oldL[i - 1] === newL[j - 1]) {
-      ops.unshift({ t: 'ctx', s: oldL[i - 1], o: i, n: j });
-      i--; j--;
-    } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
-      ops.unshift({ t: 'add', s: newL[j - 1], n: j });
-      j--;
-    } else {
-      ops.unshift({ t: 'del', s: oldL[i - 1], o: i });
-      i--;
-    }
-  }
-
-  const visible = new Set<number>();
-  for (let k = 0; k < ops.length; k++) {
-    if (ops[k].t !== 'ctx') {
-      for (let c = Math.max(0, k - ctx); c <= Math.min(ops.length - 1, k + ctx); c++) {
-        visible.add(c);
-      }
-    }
-  }
-  if (visible.size === 0) return [];
-
-  const result: DiffLine[] = [];
-  let prevIncluded = -1;
-  let totalLines = 0;
-
-  for (let k = 0; k < ops.length && totalLines < 300; k++) {
-    if (!visible.has(k)) {
-      prevIncluded = -1;
-      continue;
-    }
-    if (prevIncluded >= 0 && k - prevIncluded > 1) {
-      result.push({ type: 'sep', text: '···' });
-      totalLines++;
-    }
-    prevIncluded = k;
-    const op = ops[k];
-    switch (op.t) {
-      case 'ctx': result.push({ type: 'context', text: op.s, oldNo: op.o, newNo: op.n }); break;
-      case 'del': result.push({ type: 'del', text: op.s, oldNo: op.o }); break;
-      case 'add': result.push({ type: 'add', text: op.s, newNo: op.n }); break;
-    }
-    totalLines++;
-  }
-  return result;
-}
-
-interface EditorDiffResult {
-  addedLines: number[];
-  removedRegions: Array<{ afterLine: number; lines: string[] }>;
-}
-
-function computeEditorDiff(oldText: string, newText: string): EditorDiffResult {
-  const result: EditorDiffResult = { addedLines: [], removedRegions: [] };
-  if (oldText === newText) return result;
-  if (!oldText && !newText) return result;
-  if (!oldText) {
-    result.addedLines = newText.split('\n').map((_, i) => i);
-    return result;
-  }
-  if (!newText) {
-    result.removedRegions = [{ afterLine: -1, lines: oldText.split('\n') }];
-    return result;
-  }
-
-  const oldL = oldText.split('\n');
-  const newL = newText.split('\n');
-  const m = oldL.length, n = newL.length;
-  if (m > 2000 || n > 2000) return result;
-
-  const dp: number[][] = [];
-  for (let i = 0; i <= m; i++) dp[i] = new Array(n + 1).fill(0);
-  for (let i = 1; i <= m; i++)
-    for (let j = 1; j <= n; j++)
-      dp[i][j] = oldL[i - 1] === newL[j - 1] ? dp[i - 1][j - 1] + 1 : Math.max(dp[i - 1][j], dp[i][j - 1]);
-
-  const ops: Array<{ t: 'ctx' | 'del' | 'add'; s: string; o?: number; n?: number }> = [];
-  let i = m, j = n;
-  while (i > 0 || j > 0) {
-    if (i > 0 && j > 0 && oldL[i - 1] === newL[j - 1]) {
-      ops.unshift({ t: 'ctx', s: oldL[i - 1], o: i, n: j }); i--; j--;
-    } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
-      ops.unshift({ t: 'add', s: newL[j - 1], n: j }); j--;
-    } else {
-      ops.unshift({ t: 'del', s: oldL[i - 1], o: i }); i--;
-    }
-  }
-
-  let lastNewLine = -1;
-  let curRemoved: string[] = [];
-  let removedAfter = -1;
-
-  for (const op of ops) {
-    if (op.t === 'ctx') {
-      if (curRemoved.length) {
-        result.removedRegions.push({ afterLine: removedAfter, lines: [...curRemoved] });
-        curRemoved = [];
-      }
-      lastNewLine = op.n! - 1;
-    } else if (op.t === 'add') {
-      if (curRemoved.length) {
-        result.removedRegions.push({ afterLine: removedAfter, lines: [...curRemoved] });
-        curRemoved = [];
-      }
-      result.addedLines.push(op.n! - 1);
-      lastNewLine = op.n! - 1;
-    } else {
-      if (!curRemoved.length) removedAfter = lastNewLine;
-      curRemoved.push(op.s);
-    }
-  }
-  if (curRemoved.length) {
-    result.removedRegions.push({ afterLine: removedAfter, lines: [...curRemoved] });
-  }
-  return result;
-}
-
-interface FileSnapshot { content: string; existed: boolean; }
-interface PendingChangeSnapshot { filePath: string; oldText: string; newText: string; }
-
-interface Checkpoint {
-  id: string;
-  index: number;
-  timestamp: number;
-  userMessage: string;
-  files: Map<string, FileSnapshot>;
-  savedPendingChanges: Map<string, PendingChangeSnapshot>;
-  savedTrackedFiles: Set<string>;
-  savedOriginalFileStates: Map<string, FileSnapshot>;
-}
-
-export class AiOriginalContentProvider implements vscode.TextDocumentContentProvider {
-  private _onDidChange = new vscode.EventEmitter<vscode.Uri>();
-  readonly onDidChange = this._onDidChange.event;
-  private contents = new Map<string, string>();
-
-  update(filePath: string, content: string) {
-    this.contents.set(filePath, content);
-    this._onDidChange.fire(vscode.Uri.parse(`ai-original:/${filePath}`));
-  }
-
-  remove(filePath: string) {
-    this.contents.delete(filePath);
-  }
-
-  clear() {
-    this.contents.clear();
-  }
-
-  provideTextDocumentContent(uri: vscode.Uri): string {
-    const p = uri.path.startsWith('/') ? uri.path.slice(1) : uri.path;
-    return this.contents.get(p) ?? '';
-  }
-}
+import type { ChatMessage } from '../core/types';
+import { buildMcpToolKey, normalizeMcpTrustedTools } from '../core/mcpToolAvailability';
+import { AgentQueryEngine } from '../agent';
+import { applyWorktreeSession, getAgentWorkspaceRootPath } from '../agent/worktreeSession';
+import { getTaskFilePath, listTaskRecords, stopTaskProcess, toTaskWorkspaceRelativePath, type AgentTaskRecord } from '../agent/tasks/store';
+import { ConversationAgentEngineStore } from './agentEngineStore';
+import { CheckpointController, type CheckpointControllerState } from './checkpoints';
+import { CheckpointStateStore } from './checkpointStateStore';
+import { WorkspaceChangeController, type WorkspaceChangeControllerState } from './changeController';
+import { ChangeStateStore } from './changeStateStore';
+import { ChatRunController } from './chatRunController';
+import { ConversationStore, type StoredConversationSession } from './conversations';
+import { AiOriginalContentProvider } from './originalContentProvider';
+import { ApprovalController } from './approvals';
+import { QuestionController } from './questions';
+import type { ExtensionToWebviewMessage, WebviewToExtensionMessage } from './protocol/messages';
+import type { PersistedChatArtifact } from './protocol/artifacts';
+import {
+  buildSkippedModelTests,
+  loadAvailableModels,
+  normalizeSettingsPayload,
+  runSelectedModelTests,
+  testSettingsConnection,
+  type SettingsPayload,
+} from './settingsModels';
+import { inspectMcpDraft } from './mcpInspector';
+import {
+  buildMissingChatModelIssueFromCatalog,
+  type SettingsModelIssue,
+  type SettingsPanelRequest,
+  type SettingsSectionId,
+} from './modelSelectionIssue';
+import { loadMcpSettingsEditorState, saveMcpSettingsEditorState } from './mcpSettings';
+import { getChatViewHtml, getSettingsPanelHtml } from './webviewTemplate';
 
 export class AiChatViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'aiAssistant.chatView';
+  public static readonly settingsPanelType = 'aiAssistant.settingsPanel';
 
   private view: vscode.WebviewView | undefined;
-  private chatHistory: ChatMessage[] = [];
-  private pendingChanges = new Map<string, { filePath: string; oldText: string; newText: string }>();
+  private settingsPanel: vscode.WebviewPanel | undefined;
+  private readonly chatHistory: ChatMessage[] = [];
+  private readonly conversationStore: ConversationStore;
+  private readonly engineStore: ConversationAgentEngineStore;
+  private readonly checkpointController: CheckpointController;
+  private readonly checkpointStateStore: CheckpointStateStore;
+  private readonly changeStateStore: ChangeStateStore;
+  private readonly changeController: WorkspaceChangeController;
+  private readonly approvalController: ApprovalController;
+  private readonly questionController: QuestionController;
+  private readonly chatRunController: ChatRunController;
+  private readonly checkpointStatesByConversation = new Map<string, CheckpointControllerState>();
+  private readonly changeStatesByConversation = new Map<string, WorkspaceChangeControllerState>();
+  private activeConversationId: string;
+  private activeEngine: AgentQueryEngine;
+  private chatArtifacts: PersistedChatArtifact[] = [];
+  private artifactPersistTimer: NodeJS.Timeout | null = null;
+  private changePersistTimer: NodeJS.Timeout | null = null;
+  private changePersistPayload: { conversationId: string; state: WorkspaceChangeControllerState } | null = null;
+  private checkpointPersistTimer: NodeJS.Timeout | null = null;
+  private checkpointPersistPayload: { conversationId: string; state: CheckpointControllerState } | null = null;
+  private tasksPollTimer: NodeJS.Timeout | null = null;
+  private tasksRefreshInFlight = false;
+  private pendingSettingsSection: SettingsSectionId | undefined;
+  private pendingModelSelectionIssue: SettingsModelIssue | null = null;
+  private highlightPendingModelSelectionIssue = false;
 
-  private checkpoints: Checkpoint[] = [];
-  private trackedFiles = new Set<string>();
-  private originalFileStates = new Map<string, FileSnapshot>();
-
-  private scm: vscode.SourceControl | undefined;
-  private scmGroup: vscode.SourceControlResourceGroup | undefined;
-  private originalProvider: AiOriginalContentProvider;
-  private shellConfirmResolvers = new Map<string, (result: { approved: boolean; command: string }) => void>();
-  private preRevertSnapshot: {
-    checkpointId: string;
-    pendingChanges: Map<string, { filePath: string; oldText: string; newText: string }>;
-    trackedFiles: Set<string>;
-    originalFileStates: Map<string, FileSnapshot>;
-    fileContents: Map<string, { content: string; existed: boolean }>;
-  } | null = null;
-
-  private addedDeco: vscode.TextEditorDecorationType;
-  private removedDeco: vscode.TextEditorDecorationType;
-  private decoTimer: ReturnType<typeof setTimeout> | undefined;
-  private runningAbort: AbortController | null = null;
-
-  constructor(private readonly context: vscode.ExtensionContext, originalProvider: AiOriginalContentProvider) {
-    this.originalProvider = originalProvider;
-
-    this.addedDeco = vscode.window.createTextEditorDecorationType({
-      isWholeLine: true,
-      backgroundColor: 'rgba(35, 134, 54, 0.18)',
-      overviewRulerColor: 'rgba(35, 134, 54, 0.6)',
-      overviewRulerLane: vscode.OverviewRulerLane.Left,
-    });
-    this.removedDeco = vscode.window.createTextEditorDecorationType({
-      isWholeLine: true,
-      borderWidth: '2px 0 0 0',
-      borderStyle: 'dashed',
-      borderColor: 'rgba(218, 54, 51, 0.6)',
-      overviewRulerColor: 'rgba(218, 54, 51, 0.6)',
-      overviewRulerLane: vscode.OverviewRulerLane.Left,
-    });
-
-    context.subscriptions.push(
-      this.addedDeco,
-      this.removedDeco,
-      vscode.window.onDidChangeActiveTextEditor(e => { if (e) this.scheduleDecoUpdate(e); }),
-      vscode.workspace.onDidChangeTextDocument(e => {
-        const ed = vscode.window.activeTextEditor;
-        if (ed && ed.document.uri.toString() === e.document.uri.toString()) this.scheduleDecoUpdate(ed);
-      })
-    );
-
-    this.initScm();
-  }
-
-  private scheduleDecoUpdate(editor: vscode.TextEditor) {
-    if (this.decoTimer) clearTimeout(this.decoTimer);
-    this.decoTimer = setTimeout(() => this.updateEditorDecorations(editor), 250);
-  }
-
-  private updateEditorDecorations(editor: vscode.TextEditor) {
-    if (editor.document.uri.scheme !== 'file') {
-      return;
+  constructor(
+    private readonly context: vscode.ExtensionContext,
+    originalProvider: AiOriginalContentProvider,
+  ) {
+    this.conversationStore = new ConversationStore(context.workspaceState);
+    this.engineStore = new ConversationAgentEngineStore((conversationId, kind) => this.handleEngineRuntimeChanged(conversationId, kind));
+    this.checkpointStateStore = new CheckpointStateStore(context);
+    this.changeStateStore = new ChangeStateStore(context);
+    const activeConversation = this.conversationStore.getActiveConversation();
+    this.activeConversationId = activeConversation.id;
+    this.chatHistory.push(...activeConversation.messages);
+    this.chatArtifacts = Array.isArray(activeConversation.artifactEvents)
+      ? activeConversation.artifactEvents.map((artifact) => clonePersistedArtifact(artifact))
+      : [];
+    this.activeEngine = this.engineStore.getOrCreate(activeConversation.id, activeConversation.messages, activeConversation.agentRuntime);
+    const appliedInitialWorktree = applyWorktreeSession(activeConversation.agentRuntime?.worktreeSession || null);
+    if (!appliedInitialWorktree && activeConversation.agentRuntime?.worktreeSession) {
+      this.activeEngine.setWorktreeSession(null);
     }
 
-    const filePath = vscode.workspace.asRelativePath(editor.document.uri, false);
-
-    let hasPending = false;
-    for (const [, c] of this.pendingChanges) {
-      if (c.filePath === filePath) { hasPending = true; break; }
-    }
-
-    if (!hasPending) {
-      editor.setDecorations(this.addedDeco, []);
-      editor.setDecorations(this.removedDeco, []);
-      return;
-    }
-
-    const orig = this.originalFileStates.get(filePath);
-    if (!orig) {
-      editor.setDecorations(this.addedDeco, []);
-      editor.setDecorations(this.removedDeco, []);
-      return;
-    }
-
-    const diff = computeEditorDiff(orig.content, editor.document.getText());
-
-    const addedRanges: vscode.DecorationOptions[] = diff.addedLines
-      .filter(ln => ln < editor.document.lineCount)
-      .map(ln => ({ range: new vscode.Range(ln, 0, ln, editor.document.lineAt(ln).text.length) }));
-
-    const removedRanges: vscode.DecorationOptions[] = diff.removedRegions.map(region => {
-      const ln = Math.min(Math.max(0, region.afterLine + 1), editor.document.lineCount - 1);
-      const hover = new vscode.MarkdownString();
-      hover.isTrusted = true;
-      hover.appendMarkdown(`**Удалено ${region.lines.length} строк:**\n`);
-      hover.appendCodeblock(region.lines.join('\n'), this.guessLanguage(filePath));
-      return {
-        range: new vscode.Range(ln, 0, ln, 0),
-        hoverMessage: hover,
-      };
+    this.changeController = new WorkspaceChangeController({
+      context,
+      originalProvider,
+      post: (message) => this.post(message),
     });
 
-    editor.setDecorations(this.addedDeco, addedRanges);
-    editor.setDecorations(this.removedDeco, removedRanges);
-  }
+    this.approvalController = new ApprovalController((message) => this.post(message));
+    this.questionController = new QuestionController((message) => this.post(message));
 
-  private initScm() {
-    const folder = vscode.workspace.workspaceFolders?.[0];
-    if (!folder) return;
-    this.scm = vscode.scm.createSourceControl('ai-agent', 'AI Agent', folder.uri);
-    this.scm.inputBox.placeholder = 'Нажмите ✓ чтобы принять все изменения';
-    this.scm.acceptInputCommand = { title: 'Accept All', command: 'ai-assistant.acceptAllChanges' };
-    this.scmGroup = this.scm.createResourceGroup('pending', 'Ожидают принятия');
-    this.scmGroup.hideWhenEmpty = true;
-    this.context.subscriptions.push(this.scm);
-  }
+    this.checkpointController = new CheckpointController({
+      getPendingChanges: () => this.changeController.getPendingChanges(),
+      setPendingChanges: (value) => {
+        this.changeController.setPendingChanges(value);
+      },
+      getTrackedFiles: () => this.changeController.getTrackedFiles(),
+      setTrackedFiles: (value) => {
+        this.changeController.setTrackedFiles(value);
+      },
+      getOriginalFileStates: () => this.changeController.getOriginalFileStates(),
+      setOriginalFileStates: (value) => {
+        this.changeController.setOriginalFileStates(value);
+      },
+      getChatHistory: () => this.chatHistory,
+      setChatHistory: (value) => {
+        this.chatHistory.splice(0, this.chatHistory.length, ...value);
+      },
+      refreshOriginalProvider: (states) => {
+        this.changeController.refreshOriginalProvider(states);
+      },
+      refreshScm: () => this.changeController.refreshScm(),
+      post: (message) => this.post(message),
+    });
 
-  private refreshScm() {
-    if (!this.scmGroup || !this.scm) return;
-    const folders = vscode.workspace.workspaceFolders;
-    if (!folders?.length) return;
+    this.chatRunController = new ChatRunController({
+      chatHistory: this.chatHistory,
+      getAgentEngine: () => this.activeEngine,
+      checkpointController: this.checkpointController,
+      changeController: this.changeController,
+      getActiveFileContext: () => this.getActiveFileContext(),
+      post: (message) => this.post(message),
+      requestApproval: (request, signal) => this.approvalController.request(request, signal),
+      cancelApproval: (confirmId, reason) => this.approvalController.cancel(confirmId, reason),
+      requestQuestion: (request, signal) => this.questionController.request(request, signal),
+      cancelQuestion: (confirmId, reason) => this.questionController.cancel(confirmId, reason),
+      persistConversation: () => this.persistActiveConversation(),
+      openSettingsPanel: (request) => this.openSettingsPanel(request),
+    });
 
-    const pendingFiles = new Map<string, string[]>();
-    for (const [cid, change] of this.pendingChanges) {
-      const arr = pendingFiles.get(change.filePath) || [];
-      arr.push(cid);
-      pendingFiles.set(change.filePath, arr);
+    this.chatRunController.restoreConversationState({
+      messages: activeConversation.messages,
+      suggestions: activeConversation.suggestions,
+      suggestionsState: activeConversation.suggestionsState,
+      suggestionsSummary: activeConversation.suggestionsSummary,
+      traceRuns: activeConversation.traceRuns,
+      artifactEvents: activeConversation.artifactEvents,
+    });
+    const initialChangeState = this.changeStateStore.read(activeConversation.id);
+    if (initialChangeState) {
+      this.changeStatesByConversation.set(activeConversation.id, initialChangeState);
+      this.changeController.restoreState(initialChangeState);
     }
-
-    const resources: vscode.SourceControlResourceState[] = [];
-    for (const [filePath] of pendingFiles) {
-      const fileUri = vscode.Uri.joinPath(folders[0].uri, filePath);
-      const originalUri = vscode.Uri.parse(`ai-original:/${filePath}`);
-
-      const orig = this.originalFileStates.get(filePath);
-      this.originalProvider.update(filePath, orig?.content ?? '');
-
-      const isNew = !orig || !orig.existed;
-      resources.push({
-        resourceUri: fileUri,
-        decorations: {
-          tooltip: isNew ? 'AI: новый файл' : 'AI: изменено агентом',
-          iconPath: new vscode.ThemeIcon(
-            isNew ? 'diff-added' : 'diff-modified',
-            new vscode.ThemeColor(isNew ? 'charts.green' : 'charts.yellow')
-          )
-        },
-        command: {
-          title: 'Show Diff',
-          command: 'ai-assistant.showScmDiff',
-          arguments: [filePath]
-        }
-      });
+    const initialCheckpointState = this.checkpointStateStore.read(activeConversation.id);
+    if (initialCheckpointState) {
+      this.checkpointStatesByConversation.set(activeConversation.id, initialCheckpointState);
+      this.checkpointController.restoreState(initialCheckpointState);
     }
-
-    this.scmGroup.resourceStates = resources;
-    this.scm.count = resources.length;
-
-    const editor = vscode.window.activeTextEditor;
-    if (editor) this.scheduleDecoUpdate(editor);
   }
 
   public acceptAllChangesForFile(filePath: string) {
-    const toRemove: string[] = [];
-    for (const [cid, change] of this.pendingChanges) {
-      if (change.filePath === filePath) toRemove.push(cid);
-    }
-    for (const cid of toRemove) {
-      this.pendingChanges.delete(cid);
-      this.post({ type: 'changeAccepted', changeId: cid });
-    }
-    this.originalProvider.remove(filePath);
-    this.refreshScm();
+    this.changeController.acceptAllChangesForFile(filePath);
   }
 
   public async rejectAllChangesForFile(filePath: string) {
-    const folders = vscode.workspace.workspaceFolders;
-    if (!folders?.length) return;
-    const orig = this.originalFileStates.get(filePath);
-    try {
-      const uri = vscode.Uri.joinPath(folders[0].uri, filePath);
-      if (orig && orig.existed) {
-        await vscode.workspace.fs.writeFile(uri, Buffer.from(orig.content, 'utf-8'));
-      } else {
-        try { await vscode.workspace.fs.delete(uri); } catch { /* didn't exist originally */ }
-      }
-    } catch (e: any) {
-      vscode.window.showErrorMessage(`Ошибка отката: ${e?.message || e}`);
-      return;
-    }
-    const toRemove: string[] = [];
-    for (const [cid, change] of this.pendingChanges) {
-      if (change.filePath === filePath) toRemove.push(cid);
-    }
-    for (const cid of toRemove) {
-      this.pendingChanges.delete(cid);
-      this.post({ type: 'changeRejected', changeId: cid });
-    }
-    this.originalProvider.remove(filePath);
-    this.refreshScm();
+    await this.changeController.rejectAllChangesForFile(filePath);
   }
 
   public acceptAllChanges() {
-    for (const [cid] of this.pendingChanges) {
-      this.post({ type: 'changeAccepted', changeId: cid });
-    }
-    this.pendingChanges.clear();
-    this.originalProvider.clear();
-    this.refreshScm();
+    this.changeController.acceptAllChanges();
   }
 
   public async rejectAllChanges() {
-    const files = new Set<string>();
-    for (const [, change] of this.pendingChanges) files.add(change.filePath);
-    for (const fp of files) await this.rejectAllChangesForFile(fp);
+    await this.changeController.rejectAllChanges();
   }
 
   resolveWebviewView(
     webviewView: vscode.WebviewView,
     _context: vscode.WebviewViewResolveContext,
-    _token: vscode.CancellationToken
-  ): void | Thenable<void> {
+    _token: vscode.CancellationToken,
+  ): void {
     this.view = webviewView;
-    webviewView.webview.options = {
-      enableScripts: true,
-      localResourceRoots: [vscode.Uri.joinPath(this.context.extensionUri, 'media')]
-    };
+    webviewView.webview.options = this.getWebviewOptions();
     webviewView.webview.html = getChatViewHtml(webviewView.webview, this.context.extensionUri);
-
     webviewView.webview.onDidReceiveMessage(async (message) => {
-      switch (message.type) {
-        case 'send': {
-          const t = (message.text as string).trim();
-          if (t && !this.runningAbort) await this.handleUserMessage(t);
-          break;
-        }
-        case 'stop': {
-          if (this.runningAbort) {
-            this.runningAbort.abort();
-            this.runningAbort = null;
-          }
-          break;
-        }
-        case 'getSettings': await this.sendSettings(); break;
-        case 'saveSettings': await this.handleSaveSettings(message.data || {}); break;
-        case 'testConnection': await this.handleTestConnection(message.data || {}); break;
-        case 'loadModels': await this.handleLoadModels(message.data || {}); break;
-        case 'acceptChange': this.handleAcceptChange(message.changeId); break;
-        case 'rejectChange': await this.handleRejectChange(message.changeId); break;
-        case 'acceptAll': this.acceptAllChanges(); break;
-        case 'rejectAll': await this.rejectAllChanges(); break;
-        case 'openChangedFile': await this.handleOpenFile(message.filePath); break;
-        case 'showDiff': await this.handleShowDiff(message.changeId); break;
-        case 'revertToCheckpoint': await this.handleRevertToCheckpoint(message.checkpointId); break;
-        case 'undoRevert': await this.handleUndoRevert(); break;
-        case 'getCheckpoints': this.sendCheckpointsList(); break;
-        case 'shellConfirmResult': {
-          const resolver = this.shellConfirmResolvers.get(message.confirmId);
-          if (resolver) {
-            resolver({ approved: !!message.approved, command: message.command || '' });
-            this.shellConfirmResolvers.delete(message.confirmId);
-          }
-          break;
-        }
-      }
+      await this.handleWebviewMessage(message as WebviewToExtensionMessage);
+    });
+    this.startTasksPolling();
+    webviewView.onDidDispose(() => {
+      this.stopTasksPolling();
+      this.view = undefined;
     });
   }
 
-  private async handleUserMessage(text: string) {
-    this.chatHistory.push({ role: 'user', content: text });
-    this.post({ type: 'traceReset' });
-    const cfg = readConfig();
-    if (!isConfigValid(cfg)) {
-      this.post({ type: 'error', text: 'Настройте API и модель во вкладке Settings.' });
-      this.post({ type: 'agentDone' });
+  public openSettingsPanel(request?: SettingsPanelRequest): void {
+    this.applyPendingSettingsRequest(request);
+    const targetColumn = vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.Active;
+    if (this.settingsPanel) {
+      this.settingsPanel.reveal(targetColumn, false);
+      void this.sendSettings();
       return;
     }
 
-    const cp = await this.createCheckpoint(text);
-    this.post({
-      type: 'checkpoint',
-      id: cp.id,
-      index: cp.index,
-      timestamp: cp.timestamp,
-      userMessage: text.slice(0, 80),
-      fileCount: cp.files.size,
-      trackedTotal: this.trackedFiles.size
+    const panel = vscode.window.createWebviewPanel(
+      AiChatViewProvider.settingsPanelType,
+      `${EXTENSION_NAME}: Настройки`,
+      targetColumn,
+      {
+        ...this.getWebviewOptions(),
+        retainContextWhenHidden: true,
+      },
+    );
+
+    panel.webview.html = getSettingsPanelHtml(panel.webview, this.context.extensionUri);
+    panel.webview.onDidReceiveMessage(async (message) => {
+      await this.handleWebviewMessage(message as WebviewToExtensionMessage);
+    });
+    panel.onDidDispose(() => {
+      if (this.settingsPanel === panel) {
+        this.settingsPanel = undefined;
+      }
     });
 
-    const abort = new AbortController();
-    this.runningAbort = abort;
+    this.settingsPanel = panel;
+    void this.sendSettings();
+  }
 
-    const loading = vscode.window.setStatusBarMessage(`${EXTENSION_NAME}: агент работает...`);
-    try {
-      let activeFile: { path: string; language: string; content: string } | null = null;
-      const editor = vscode.window.activeTextEditor;
-      if (editor) {
-        const doc = editor.document;
-        activeFile = { path: vscode.workspace.asRelativePath(doc.uri, false), language: doc.languageId, content: doc.getText() };
+  private async handleWebviewMessage(message: WebviewToExtensionMessage) {
+    switch (message.type) {
+      case 'send': {
+        const text = (message.text as string).trim();
+        if (text && !this.chatRunController.isRunning()) {
+          this.commitRevertBranchIfNeeded();
+          await this.chatRunController.handleUserMessage(text);
+        }
+        return;
       }
-      const answer = await runAgent(text, this.chatHistory, activeFile, (phase, msg, meta): void | Promise<any> => {
-        if (abort.signal.aborted) return;
-        if (phase === 'shell-confirm' && meta?.confirmId) {
-          return new Promise<{ approved: boolean; command: string }>((resolve) => {
-            this.shellConfirmResolvers.set(meta.confirmId, resolve);
-            this.post({
-              type: 'shellConfirm',
-              confirmId: meta.confirmId,
-              command: meta.command || '',
-              cwd: meta.cwd || ''
-            });
+      case 'openSettingsPanel':
+        this.openSettingsPanel();
+        return;
+      case 'closeSettingsPanel':
+        this.settingsPanel?.dispose();
+        return;
+      case 'stop': {
+        this.chatRunController.stop();
+        return;
+      }
+      case 'getSettings':
+        await this.sendSettings();
+        return;
+      case 'getConversationState':
+        this.sendConversationSessions();
+        this.sendActiveConversationState(false);
+        this.sendComposerPermissionsState();
+        await this.sendTasksState();
+        return;
+      case 'getConversationSessions':
+        this.sendConversationSessions();
+        return;
+      case 'getTasksState':
+        await this.sendTasksState();
+        return;
+      case 'createConversation':
+        await this.handleCreateConversation();
+        return;
+      case 'switchConversation':
+        await this.handleSwitchConversation(message.conversationId);
+        return;
+      case 'deleteConversation':
+        await this.handleDeleteConversation(message.conversationId);
+        return;
+      case 'clearConversation':
+        await this.handleClearConversation();
+        return;
+      case 'saveSettings':
+        await this.handleSaveSettings(message.data || {});
+        return;
+      case 'saveComposerPermissions':
+        await this.handleSaveComposerPermissions(message.autoApproval);
+        return;
+      case 'testConnection':
+        await this.handleTestConnection(message.data || {});
+        return;
+      case 'testModels':
+        await this.handleTestModels(message.data || {});
+        return;
+      case 'inspectMcp':
+        await this.handleInspectMcp(message.data || {});
+        return;
+      case 'refreshSuggestions':
+        await this.chatRunController.handleRefreshSuggestions();
+        return;
+      case 'acceptChange':
+        this.commitRevertBranchIfNeeded();
+        this.changeController.handleAcceptChange(message.changeId);
+        return;
+      case 'rejectChange':
+        this.commitRevertBranchIfNeeded();
+        await this.changeController.handleRejectChange(message.changeId);
+        return;
+      case 'acceptAll':
+        this.commitRevertBranchIfNeeded();
+        this.acceptAllChanges();
+        return;
+      case 'rejectAll':
+        this.commitRevertBranchIfNeeded();
+        await this.rejectAllChanges();
+        return;
+      case 'openChangedFile':
+        await this.changeController.handleOpenFile(message.filePath);
+        return;
+      case 'showDiff':
+        await this.changeController.handleShowDiff(message.changeId);
+        return;
+      case 'openTaskFile':
+        await this.changeController.handleOpenFile(message.filePath);
+        return;
+      case 'openSessionMemory':
+        await this.changeController.handleOpenFile(message.filePath);
+        return;
+      case 'stopTask': {
+        const task = await stopTaskProcess(message.taskId, {
+          force: message.force === true,
+          rootPath: this.getTasksRootPath(),
+        });
+        if (!task) {
+          this.post({ type: 'error', text: `Задача "${message.taskId}" не найдена.` });
+        } else {
+          this.post({
+            type: 'status',
+            text: task.status === 'cancelled'
+              ? `Остановка задачи #${task.id} запрошена.`
+              : `Для задачи #${task.id} обновлён статус остановки.`,
           });
         }
-        if (phase === 'file-change' && meta?.changeId) {
-          const fp = meta.filePath as string;
-          if (!this.trackedFiles.has(fp)) {
-            this.trackedFiles.add(fp);
-            const existed = (meta.fullOldText || '') !== '' || meta.changeType !== 'create';
-            this.originalFileStates.set(fp, {
-              content: meta.fullOldText || '',
-              existed: existed && (meta.fullOldText || '') !== ''
-            });
-          }
-          this.pendingChanges.set(meta.changeId, {
-            filePath: fp,
-            oldText: meta.fullOldText || '',
-            newText: meta.fullNewText || ''
-          });
-          const diffLines = computeUnifiedDiff(meta.fullOldText || '', meta.fullNewText || '');
-          this.post({
-            type: 'fileChange',
-            changeId: meta.changeId,
-            filePath: fp,
-            changeType: meta.changeType,
-            tool: meta.tool,
-            oldSnippet: meta.oldSnippet || '',
-            newSnippet: meta.newSnippet || '',
-            cellIdx: meta.cellIdx,
-            diffLines
-          });
-          this.refreshScm();
+        await this.sendTasksState();
+        return;
+      }
+      case 'revertToCheckpoint':
+        if (this.chatRunController.isRunning()) {
+          this.post({ type: 'error', text: 'Сначала дождитесь завершения текущего запуска агента.' });
           return;
         }
-        this.post({ type: 'traceEvent', phase, text: msg, data: meta || {} });
-      }, abort.signal);
-      this.chatHistory.push({ role: 'assistant', content: answer });
-      this.post({ type: 'assistant', text: answer });
-      if (!abort.signal.aborted) {
-        await this.generateSuggestions(cfg);
+        await this.checkpointController.revertToCheckpoint(message.checkpointId);
+        this.syncActiveConversationEngine();
+        await this.persistActiveConversation();
+        this.sendActiveConversationState(true);
+        return;
+      case 'undoRevert':
+        if (this.chatRunController.isRunning()) {
+          this.post({ type: 'error', text: 'Сначала дождитесь завершения текущего запуска агента.' });
+          return;
+        }
+        await this.checkpointController.undoRevert();
+        this.syncActiveConversationEngine();
+        await this.persistActiveConversation();
+        this.sendActiveConversationState(true);
+        return;
+      case 'getCheckpoints':
+        this.checkpointController.sendCheckpointsList();
+        return;
+      case 'approvalResult':
+        await this.handleApprovalResult(message.result);
+        return;
+      case 'questionResult':
+        this.questionController.resolve(message.result);
+        return;
+      case 'fileConfirmResult':
+        this.approvalController.resolveLegacyFile(message);
+        return;
+      case 'shellConfirmResult': {
+        this.approvalController.resolveLegacyShell(message);
+        return;
       }
-    } catch (error: any) {
-      if (!abort.signal.aborted) {
-        this.post({ type: 'error', text: error?.message || String(error) });
+      case 'planConfirmResult': {
+        this.approvalController.resolveLegacyPlan(message);
+        return;
       }
-    } finally {
-      this.runningAbort = null;
-      loading.dispose();
-      this.post({ type: 'agentDone' });
+      default:
+        return;
     }
   }
 
-  private async generateSuggestions(cfg: { apiBaseUrl: string; apiKey: string; model: string }) {
-    try {
-      const recentHistory = this.chatHistory.slice(-6);
-      if (recentHistory.length === 0) return;
+  private getActiveFileContext(): { path: string; language: string; content: string } | null {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) return null;
 
-      const summaryParts: string[] = [];
-      for (const m of recentHistory) {
-        const preview = (m.content || '').slice(0, 150).replace(/\n/g, ' ');
-        summaryParts.push(`${m.role}: ${preview}`);
-      }
-
-      const messages: ChatMessage[] = [
-        {
-          role: 'user',
-          content:
-            'Based on this conversation between a developer and an AI assistant, generate exactly 5 follow-up suggestions.\n\n' +
-            'Conversation:\n' +
-            summaryParts.join('\n') + '\n\n' +
-            'Reply with ONLY a raw JSON array (no markdown fences, no explanation):\n' +
-            '[{"label":"short text (3-5 words)","query":"full request"},...]'
-        }
-      ];
-      const raw = await sendChatRequest(cfg.apiBaseUrl, cfg.apiKey, cfg.model, messages, { temperature: 0.8, maxTokens: 600 });
-      let jsonStr = raw.trim();
-      const fenceMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
-      if (fenceMatch) jsonStr = fenceMatch[1].trim();
-      const bracketStart = jsonStr.indexOf('[');
-      const bracketEnd = jsonStr.lastIndexOf(']');
-      if (bracketStart >= 0 && bracketEnd > bracketStart) {
-        jsonStr = jsonStr.slice(bracketStart, bracketEnd + 1);
-      }
-      const arr = JSON.parse(jsonStr);
-      if (!Array.isArray(arr)) return;
-      const suggestions = arr
-        .filter((s: any) => s && typeof s.label === 'string' && typeof s.query === 'string' && s.label.trim() && s.query.trim())
-        .slice(0, 5)
-        .map((s: any) => ({ label: s.label.trim().slice(0, 40), query: s.query.trim().slice(0, 200) }));
-      if (suggestions.length > 0) {
-        this.post({ type: 'updateSuggestions', suggestions });
-      }
-    } catch (e: any) {
-      console.error('[AI-Assistant] generateSuggestions error:', e?.message || e);
-    }
-  }
-
-  private async createCheckpoint(userMessage: string): Promise<Checkpoint> {
-    const folders = vscode.workspace.workspaceFolders;
-    const files = new Map<string, FileSnapshot>();
-
-    if (folders?.length) {
-      for (const filePath of this.trackedFiles) {
-        try {
-          const uri = vscode.Uri.joinPath(folders[0].uri, filePath);
-          const content = new TextDecoder().decode(await vscode.workspace.fs.readFile(uri));
-          files.set(filePath, { content, existed: true });
-        } catch {
-          files.set(filePath, { content: '', existed: false });
-        }
-      }
-    }
-
-    const checkpoint: Checkpoint = {
-      id: `cp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      index: this.checkpoints.length,
-      timestamp: Date.now(),
-      userMessage,
-      files,
-      savedPendingChanges: new Map(
-        Array.from(this.pendingChanges).map(([k, v]) => [k, { ...v }])
-      ),
-      savedTrackedFiles: new Set(this.trackedFiles),
-      savedOriginalFileStates: new Map(
-        Array.from(this.originalFileStates).map(([k, v]) => [k, { ...v }])
-      ),
+    const document = editor.document;
+    return {
+      path: vscode.workspace.asRelativePath(document.uri, false),
+      language: document.languageId,
+      content: document.getText(),
     };
-
-    this.checkpoints.push(checkpoint);
-    return checkpoint;
   }
 
-  private async handleRevertToCheckpoint(checkpointId: string) {
-    const idx = this.checkpoints.findIndex(c => c.id === checkpointId);
-    if (idx < 0) {
-      this.post({ type: 'error', text: 'Чекпоинт не найден.' });
-      return;
-    }
-
-    const cp = this.checkpoints[idx];
-    const folders = vscode.workspace.workspaceFolders;
-    if (!folders?.length) return;
-
-    const savedContents = new Map<string, { content: string; existed: boolean }>();
-    const allPaths = new Set([...this.trackedFiles]);
-    for (const [fp] of cp.files) allPaths.add(fp);
-    for (const fp of allPaths) {
-      try {
-        const uri = vscode.Uri.joinPath(folders[0].uri, fp);
-        const data = await vscode.workspace.fs.readFile(uri);
-        savedContents.set(fp, { content: Buffer.from(data).toString('utf-8'), existed: true });
-      } catch {
-        savedContents.set(fp, { content: '', existed: false });
-      }
-    }
-
-    this.preRevertSnapshot = {
-      checkpointId,
-      pendingChanges: new Map(Array.from(this.pendingChanges).map(([k, v]) => [k, { ...v }])),
-      trackedFiles: new Set(this.trackedFiles),
-      originalFileStates: new Map(Array.from(this.originalFileStates).map(([k, v]) => [k, { ...v }])),
-      fileContents: savedContents,
+  private getWebviewOptions(): vscode.WebviewOptions {
+    return {
+      enableScripts: true,
+      localResourceRoots: [
+        this.context.extensionUri,
+        vscode.Uri.joinPath(this.context.extensionUri, 'media'),
+        vscode.Uri.joinPath(this.context.extensionUri, 'node_modules'),
+      ],
     };
-
-    const restored: string[] = [];
-    const deleted: string[] = [];
-    const errors: string[] = [];
-
-    for (const [filePath, snapshot] of cp.files) {
-      try {
-        const uri = vscode.Uri.joinPath(folders[0].uri, filePath);
-        if (snapshot.existed) {
-          await vscode.workspace.fs.writeFile(uri, Buffer.from(snapshot.content, 'utf-8'));
-          restored.push(filePath);
-        } else {
-          try { await vscode.workspace.fs.delete(uri); deleted.push(filePath); } catch { /* didn't exist */ }
-        }
-      } catch (e: any) {
-        errors.push(`${filePath}: ${e?.message || e}`);
-      }
-    }
-
-    const allTrackedAtRevert = new Set([...this.trackedFiles, ...cp.savedTrackedFiles]);
-    for (const filePath of allTrackedAtRevert) {
-      if (cp.files.has(filePath)) continue;
-      const origFromCp = cp.savedOriginalFileStates.get(filePath);
-      const origCurrent = this.originalFileStates.get(filePath);
-      const orig = origFromCp || origCurrent;
-      try {
-        const uri = vscode.Uri.joinPath(folders[0].uri, filePath);
-        if (orig && orig.existed) {
-          await vscode.workspace.fs.writeFile(uri, Buffer.from(orig.content, 'utf-8'));
-          restored.push(filePath);
-        } else {
-          try { await vscode.workspace.fs.delete(uri); deleted.push(filePath); } catch { /* ignore */ }
-        }
-      } catch (e: any) {
-        errors.push(`${filePath}: ${e?.message || e}`);
-      }
-    }
-
-    this.pendingChanges = new Map(
-      Array.from(cp.savedPendingChanges).map(([k, v]) => [k, { ...v }])
-    );
-    this.trackedFiles = new Set(cp.savedTrackedFiles);
-    this.originalFileStates = new Map(
-      Array.from(cp.savedOriginalFileStates).map(([k, v]) => [k, { ...v }])
-    );
-
-    this.originalProvider.clear();
-    for (const [fp, snap] of this.originalFileStates) {
-      this.originalProvider.update(fp, snap.content);
-    }
-    this.refreshScm();
-
-    const restoredPendingIds = Array.from(this.pendingChanges.keys());
-
-    this.post({
-      type: 'checkpointReverted',
-      checkpointId,
-      index: cp.index,
-      restored: restored.length,
-      deleted: deleted.length,
-      errors,
-      restoredPendingIds
-    });
-
-    vscode.window.showInformationMessage(
-      `${EXTENSION_NAME}: откат к чекпоинту #${cp.index} — ` +
-      `восстановлено ${restored.length} файлов` +
-      (deleted.length ? `, удалено ${deleted.length}` : '') +
-      (errors.length ? `, ошибок: ${errors.length}` : '')
-    );
-  }
-
-  private async handleUndoRevert() {
-    const snap = this.preRevertSnapshot;
-    if (!snap) {
-      this.post({ type: 'error', text: 'Нет сохранённого состояния для отмены отката.' });
-      return;
-    }
-    const folders = vscode.workspace.workspaceFolders;
-    if (!folders?.length) return;
-
-    const errors: string[] = [];
-    for (const [fp, saved] of snap.fileContents) {
-      try {
-        const uri = vscode.Uri.joinPath(folders[0].uri, fp);
-        if (saved.existed) {
-          await vscode.workspace.fs.writeFile(uri, Buffer.from(saved.content, 'utf-8'));
-        } else {
-          try { await vscode.workspace.fs.delete(uri); } catch { /* didn't exist */ }
-        }
-      } catch (e: any) {
-        errors.push(`${fp}: ${e?.message || e}`);
-      }
-    }
-
-    this.pendingChanges = new Map(Array.from(snap.pendingChanges).map(([k, v]) => [k, { ...v }]));
-    this.trackedFiles = new Set(snap.trackedFiles);
-    this.originalFileStates = new Map(Array.from(snap.originalFileStates).map(([k, v]) => [k, { ...v }]));
-
-    this.originalProvider.clear();
-    for (const [fp, s] of this.originalFileStates) {
-      this.originalProvider.update(fp, s.content);
-    }
-    this.refreshScm();
-
-    const restoredPendingIds = Array.from(this.pendingChanges.keys());
-    this.post({
-      type: 'undoRevertDone',
-      checkpointId: snap.checkpointId,
-      restoredPendingIds,
-      errors,
-    });
-
-    this.preRevertSnapshot = null;
-    vscode.window.showInformationMessage(`${EXTENSION_NAME}: откат отменён, состояние восстановлено.`);
-  }
-
-  private sendCheckpointsList() {
-    const list = this.checkpoints.map(cp => ({
-      id: cp.id,
-      index: cp.index,
-      timestamp: cp.timestamp,
-      userMessage: cp.userMessage.slice(0, 80),
-      fileCount: cp.files.size,
-      trackedTotal: this.trackedFiles.size
-    }));
-    this.post({ type: 'checkpointsList', checkpoints: list });
-  }
-
-  private handleAcceptChange(changeId: string) {
-    if (!changeId) return;
-    this.pendingChanges.delete(changeId);
-    this.post({ type: 'changeAccepted', changeId });
-    this.refreshScm();
-  }
-
-  private async handleRejectChange(changeId: string) {
-    if (!changeId) return;
-    const change = this.pendingChanges.get(changeId);
-    if (!change) {
-      this.post({ type: 'changeRejected', changeId, error: 'Изменение не найдено' });
-      return;
-    }
-    const folders = vscode.workspace.workspaceFolders;
-    if (!folders?.length) return;
-    try {
-      if (change.oldText === '' && change.newText !== '') {
-        const uri = vscode.Uri.joinPath(folders[0].uri, change.filePath);
-        await vscode.workspace.fs.delete(uri);
-      } else {
-        const uri = vscode.Uri.joinPath(folders[0].uri, change.filePath);
-        await vscode.workspace.fs.writeFile(uri, Buffer.from(change.oldText, 'utf-8'));
-      }
-      this.pendingChanges.delete(changeId);
-      this.post({ type: 'changeRejected', changeId });
-      this.refreshScm();
-    } catch (e: any) {
-      this.post({ type: 'error', text: `Ошибка отката: ${e?.message || e}` });
-    }
-  }
-
-  private async handleOpenFile(filePath: string) {
-    if (!filePath) return;
-    const folders = vscode.workspace.workspaceFolders;
-    if (!folders?.length) return;
-    try {
-      const uri = vscode.Uri.joinPath(folders[0].uri, filePath);
-      const doc = await vscode.workspace.openTextDocument(uri);
-      await vscode.window.showTextDocument(doc, { preview: false });
-    } catch (e: any) {
-      vscode.window.showErrorMessage(`Не удалось открыть "${filePath}": ${e?.message || e}`);
-    }
-  }
-
-  private async handleShowDiff(changeId: string) {
-    if (!changeId) return;
-    const change = this.pendingChanges.get(changeId);
-    if (!change) return;
-    const folders = vscode.workspace.workspaceFolders;
-    if (!folders?.length) return;
-    try {
-      const oldUri = vscode.Uri.parse(`untitled:${change.filePath}.before`);
-      const newFileUri = vscode.Uri.joinPath(folders[0].uri, change.filePath);
-      const oldDoc = await vscode.workspace.openTextDocument({ content: change.oldText, language: this.guessLanguage(change.filePath) });
-      const newDoc = await vscode.workspace.openTextDocument(newFileUri);
-      await vscode.commands.executeCommand('vscode.diff', oldDoc.uri, newDoc.uri, `${change.filePath}: до → после`);
-    } catch (e: any) {
-      vscode.window.showErrorMessage(`Не удалось показать diff: ${e?.message || e}`);
-    }
-  }
-
-  private guessLanguage(filePath: string): string {
-    const ext = filePath.split('.').pop()?.toLowerCase() || '';
-    const map: Record<string, string> = {
-      ts: 'typescript', tsx: 'typescriptreact', js: 'javascript', jsx: 'javascriptreact',
-      py: 'python', rs: 'rust', go: 'go', java: 'java', cs: 'csharp', cpp: 'cpp',
-      c: 'c', rb: 'ruby', php: 'php', swift: 'swift', kt: 'kotlin', dart: 'dart',
-      html: 'html', css: 'css', scss: 'scss', json: 'json', yaml: 'yaml', yml: 'yaml',
-      md: 'markdown', sql: 'sql', sh: 'shellscript', ipynb: 'json'
-    };
-    return map[ext] || 'plaintext';
   }
 
   private async sendSettings() {
-    const cfg = readConfig();
-    let models: string[] = [];
-    if (cfg.apiBaseUrl && cfg.apiKey) { try { models = await fetchModelsList(cfg.apiBaseUrl, cfg.apiKey); } catch {} }
-    this.post({ type: 'settingsData', data: { ...cfg, models } });
+    const config = readConfig();
+    const mcp = await loadMcpSettingsEditorState();
+    const models = await loadAvailableModels(config);
+    const detectedModelIssue = buildMissingChatModelIssueFromCatalog(config, models);
+    const modelSelectionIssue = this.pendingModelSelectionIssue || detectedModelIssue;
+    const settingsSection = this.pendingSettingsSection || (modelSelectionIssue ? 'models' : undefined);
+    const highlightModelSelectionIssue = this.highlightPendingModelSelectionIssue;
+    this.pendingSettingsSection = undefined;
+    this.pendingModelSelectionIssue = null;
+    this.highlightPendingModelSelectionIssue = false;
+    this.postSettings({
+      type: 'settingsData',
+      data: {
+        ...config,
+        mcpConfigPath: mcp.mcpConfigPath,
+        mcpServers: mcp.mcpServers,
+        mcpConfigExists: mcp.mcpConfigExists,
+        mcpSource: mcp.mcpSource,
+        mcpSourceLabel: mcp.mcpSourceLabel,
+        mcpLoadError: mcp.mcpLoadError,
+        models,
+        settingsSection,
+        modelSelectionIssue,
+        highlightModelSelectionIssue,
+      },
+    });
   }
 
-  private async handleSaveSettings(data: any) {
-    const d = { apiBaseUrl: data.apiBaseUrl || '', apiKey: data.apiKey || '', model: data.model || '', embeddingsModel: data.embeddingsModel || '', rerankModel: data.rerankModel || '' };
-    try {
-      await saveConfig(d);
-      const check = readConfig();
-      if (check.apiBaseUrl === d.apiBaseUrl && check.model === d.model) {
-        vscode.window.showInformationMessage(`${EXTENSION_NAME}: настройки сохранены (chat=${d.model || '—'}).`);
-        this.post({ type: 'settingsSaved' });
-      } else {
-        const msg = `Не удалось сохранить: "${check.model}" != "${d.model}"`;
-        vscode.window.showErrorMessage(`${EXTENSION_NAME}: ${msg}`);
-        this.post({ type: 'error', text: msg }); this.post({ type: 'settingsSaved' });
-      }
-    } catch (err: any) {
-      const msg = `Ошибка: ${err?.message || err}`;
-      vscode.window.showErrorMessage(`${EXTENSION_NAME}: ${msg}`);
-      this.post({ type: 'error', text: msg }); this.post({ type: 'settingsSaved' });
+  private applyPendingSettingsRequest(request?: SettingsPanelRequest): void {
+    if (!request) return;
+    if (request.section) {
+      this.pendingSettingsSection = request.section;
+    }
+    if (request.modelSelectionIssue !== undefined) {
+      this.pendingModelSelectionIssue = request.modelSelectionIssue || null;
+    }
+    if (request.highlightModelSelectionIssue) {
+      this.highlightPendingModelSelectionIssue = true;
     }
   }
 
-  private async handleTestConnection(data: any) {
-    if (!data.apiBaseUrl || !data.apiKey) { this.post({ type: 'connectionResult', ok: false, error: 'Укажите URL и API Key' }); return; }
+  private async handleSaveSettings(data: SettingsPayload) {
+    const config = normalizeSettingsPayload(data);
+
     try {
-      const models = await fetchModelsList(data.apiBaseUrl, data.apiKey);
-      this.post({ type: 'connectionResult', ok: true, modelsCount: models.length });
-    } catch (err: any) { this.post({ type: 'connectionResult', ok: false, error: err?.message || String(err) }); }
+      await saveConfig({
+        apiBaseUrl: config.apiBaseUrl,
+        apiKey: config.apiKey,
+        model: config.model,
+        embeddingsModel: config.embeddingsModel,
+        rerankModel: config.rerankModel,
+        systemPrompt: config.systemPrompt,
+        mcpDisabledTools: config.mcpDisabledTools,
+        mcpTrustedTools: config.mcpTrustedTools,
+        webTrustedHosts: config.webTrustedHosts,
+        webBlockedHosts: config.webBlockedHosts,
+      });
+      const savedMcp = await saveMcpSettingsEditorState({
+        mcpConfigPath: config.mcpConfigPath,
+        mcpServers: config.mcpServers,
+      });
+      const saved = readConfig();
+      if (saved.apiBaseUrl === config.apiBaseUrl && saved.model === config.model) {
+        this.resetAgentEngines();
+        vscode.window.showInformationMessage(`${EXTENSION_NAME}: настройки сохранены (chat=${config.model || '—'}).`);
+        this.postSettings({
+          type: 'settingsSaved',
+          ...(savedMcp.savedPath ? { mcpSavedPath: savedMcp.savedPath, mcpCreatedFile: savedMcp.created } : {}),
+        });
+        return;
+      }
+
+      const message = `Не удалось сохранить: "${saved.model}" != "${config.model}"`;
+      vscode.window.showErrorMessage(`${EXTENSION_NAME}: ${message}`);
+      this.postSettings({ type: 'error', text: message });
+      this.postSettings({ type: 'settingsSaved' });
+    } catch (error: any) {
+      const message = `Ошибка: ${error?.message || error}`;
+      vscode.window.showErrorMessage(`${EXTENSION_NAME}: ${message}`);
+      this.postSettings({ type: 'error', text: message });
+      this.postSettings({ type: 'settingsSaved' });
+    }
   }
 
-  private async handleLoadModels(data: any) {
-    let models: string[] = [];
-    try { if (data.apiBaseUrl && data.apiKey) models = await fetchModelsList(data.apiBaseUrl, data.apiKey); } catch {}
-    this.post({ type: 'modelsLoaded', models });
+  private async handleSaveComposerPermissions(autoApproval: SettingsPayload['autoApproval']) {
+    try {
+      await saveConfig({ autoApproval });
+      this.sendComposerPermissionsState();
+    } catch (error: any) {
+      const message = `Не удалось сохранить автодействия: ${error?.message || error}`;
+      this.post({ type: 'error', text: message });
+    }
   }
 
-  private post(msg: any) { this.view?.webview.postMessage(msg); }
+  private async handleApprovalResult(result: any) {
+    if (result?.kind === 'mcp' && result?.approved && result?.rememberTool) {
+      try {
+        const server = String(result.server || '').trim();
+        const toolName = String(result.mcpToolName || '').trim();
+        if (!server || !toolName) {
+          this.post({
+            type: 'error',
+            text: 'Не удалось сохранить авторазрешение MCP tool: не указаны сервер или имя утилиты.',
+          });
+          this.approvalController.resolve(result);
+          return;
+        }
+        const config = readConfig();
+        const nextTrusted = normalizeMcpTrustedTools([
+          ...config.mcpTrustedTools,
+          buildMcpToolKey(server, toolName),
+        ]);
+        await saveConfig({ mcpTrustedTools: nextTrusted });
+        this.post({
+          type: 'status',
+          text: `MCP tool ${server} • ${toolName} добавлен в авторазрешение.`,
+        });
+      } catch (error: any) {
+        this.post({
+          type: 'error',
+          text: `Не удалось сохранить авторазрешение MCP tool: ${error?.message || error}`,
+        });
+      }
+    }
+    this.approvalController.resolve(result);
+  }
+
+  private async handleTestConnection(data: SettingsPayload) {
+    this.postSettings({
+      type: 'connectionResult',
+      ...(await testSettingsConnection(data)),
+    });
+  }
+
+  private async handleTestModels(data: SettingsPayload) {
+    if (!data.apiBaseUrl || !data.apiKey) {
+      this.postSettings({
+        type: 'modelTestsResult',
+        ok: false,
+        summary: 'Сначала проверьте подключение.',
+        tests: buildSkippedModelTests(data, 'Нет подключения для запуска теста.'),
+      });
+      return;
+    }
+
+    const tests = await runSelectedModelTests(data);
+    const selectedCount = tests.filter((test) => test.state !== 'skipped').length;
+    const passedCount = tests.filter((test) => test.state === 'passed').length;
+    const ok = selectedCount > 0 && selectedCount === passedCount;
+    const summary =
+      selectedCount === 0
+        ? 'Выберите хотя бы одну модель, чтобы проверить её отдельным запросом.'
+        : passedCount === selectedCount
+          ? `Все выбранные модели ответили: ${passedCount}/${selectedCount}.`
+          : `Проверено ${selectedCount} моделей: успешно ${passedCount}, с ошибкой ${selectedCount - passedCount}.`;
+
+    this.postSettings({
+      type: 'modelTestsResult',
+      ok,
+      summary,
+      tests,
+    });
+  }
+
+  private async handleInspectMcp(data: SettingsPayload) {
+    try {
+      const config = normalizeSettingsPayload(data);
+      const inspection = await inspectMcpDraft({
+        mcpServers: config.mcpServers,
+        mcpDisabledTools: config.mcpDisabledTools,
+      });
+      this.postSettings({
+        type: 'mcpInspectionResult',
+        ...inspection,
+      });
+    } catch (error: any) {
+      this.postSettings({
+        type: 'mcpInspectionResult',
+        ok: false,
+        summary: `Не удалось проверить MCP: ${error?.message || error}`,
+        servers: [],
+        configErrors: [],
+        failures: [],
+      });
+    }
+  }
+
+  private postSettings(message: ExtensionToWebviewMessage) {
+    this.settingsPanel?.webview.postMessage(message);
+  }
+
+  private post(message: ExtensionToWebviewMessage) {
+    this.recordArtifactMessage(message);
+    if (shouldPersistChangeState(message)) {
+      this.scheduleChangeStatePersist();
+    }
+    if (shouldPersistCheckpointState(message)) {
+      this.scheduleCheckpointStatePersist();
+    }
+    this.view?.webview.postMessage(message);
+  }
+
+  private async persistActiveConversation() {
+    this.syncActiveConversationEngine();
+    const changeState = this.changeController.snapshotState();
+    this.changeStatesByConversation.set(this.activeConversationId, changeState);
+    await this.persistChangeStateNow(this.activeConversationId, changeState);
+    const checkpointState = this.checkpointController.snapshotState();
+    this.checkpointStatesByConversation.set(this.activeConversationId, checkpointState);
+    await this.persistCheckpointStateNow(this.activeConversationId, checkpointState);
+    await this.conversationStore.updateActiveConversation({
+      ...this.chatRunController.snapshotConversationState(),
+      artifactEvents: this.chatArtifacts.map((artifact) => clonePersistedArtifact(artifact)),
+      agentRuntime: this.activeEngine.snapshotRuntime(),
+    });
+    this.sendConversationSessions();
+  }
+
+  private sendConversationSessions() {
+    this.post({
+      type: 'conversationSessions',
+      activeId: this.conversationStore.getActiveId(),
+      sessions: this.conversationStore.listSummaries(),
+    });
+  }
+
+  private sendActiveConversationState(replace: boolean) {
+    const active = this.conversationStore.getActiveConversation();
+    const runtime = this.activeEngine.snapshotRuntime();
+    const config = readConfig();
+    const pendingChangeIds = Array.from(this.changeController.getPendingChanges().keys());
+    this.post({
+      type: 'conversationState',
+      sessionId: active.id,
+      title: active.title,
+      replace,
+      messages: active.messages.map((message) => ({ role: message.role, content: message.content })),
+      suggestions: active.suggestions,
+      suggestionsState: active.suggestionsState,
+      suggestionsSummary: active.suggestionsSummary,
+      traceRuns: active.traceRuns,
+      artifactEvents: active.artifactEvents,
+      agentMode: runtime.mode,
+      awaitingPlanApproval: runtime.awaitingPlanApproval,
+      pendingApproval: runtime.pendingApproval,
+      pendingQuestion: runtime.pendingQuestion,
+      todos: runtime.todos,
+      progress: runtime.progress,
+      sessionMemory: runtime.sessionMemory,
+      autoApproval: config.autoApproval,
+      pendingChangeIds,
+    });
+    void this.sendTasksState();
+  }
+
+  private canSwitchConversation(): boolean {
+    if (this.chatRunController.isRunning()) {
+      this.post({ type: 'error', text: 'Сначала дождитесь завершения текущего запуска агента.' });
+      return false;
+    }
+    if (this.changeController.hasPendingChanges()) {
+      this.post({ type: 'error', text: 'Сначала примите или отклоните изменения файлов, затем переключайте чат.' });
+      return false;
+    }
+    if (this.checkpointController.hasActiveRevert()) {
+      this.post({ type: 'error', text: 'Сначала завершите текущий откат, затем переключайте чат.' });
+      return false;
+    }
+    return true;
+  }
+
+  private async handleCreateConversation() {
+    if (!this.canSwitchConversation()) return;
+    await this.persistActiveConversation();
+    const created = await this.conversationStore.createConversation();
+    this.activateConversation(created);
+  }
+
+  private async handleSwitchConversation(conversationId: string) {
+    if (!this.canSwitchConversation()) return;
+    await this.persistActiveConversation();
+    const conversation = await this.conversationStore.switchConversation(conversationId);
+    if (!conversation) {
+      this.post({ type: 'error', text: 'Чат не найден.' });
+      return;
+    }
+    this.activateConversation(conversation);
+  }
+
+  private async handleClearConversation() {
+    if (!this.canSwitchConversation()) return;
+    const cleared = await this.conversationStore.clearActiveConversation();
+    this.changeStatesByConversation.delete(cleared.id);
+    await this.changeStateStore.delete(cleared.id);
+    this.checkpointStatesByConversation.delete(cleared.id);
+    await this.checkpointStateStore.delete(cleared.id);
+    this.activateConversation(cleared);
+  }
+
+  private async handleDeleteConversation(conversationId: string) {
+    if (!conversationId) return;
+    const deletingActive = conversationId === this.conversationStore.getActiveId();
+    if (deletingActive && !this.canSwitchConversation()) return;
+
+    await this.persistActiveConversation();
+    const nextActive = await this.conversationStore.deleteConversation(conversationId);
+    if (!nextActive) {
+      this.post({ type: 'error', text: 'Чат не найден.' });
+      return;
+    }
+    this.engineStore.delete(conversationId);
+    this.changeStatesByConversation.delete(conversationId);
+    await this.changeStateStore.delete(conversationId);
+    this.checkpointStatesByConversation.delete(conversationId);
+    await this.checkpointStateStore.delete(conversationId);
+
+    if (deletingActive) {
+      this.activateConversation(nextActive);
+      return;
+    }
+
+    this.sendConversationSessions();
+  }
+
+  private activateConversation(conversation: StoredConversationSession) {
+    this.activeConversationId = conversation.id;
+    this.activeEngine = this.engineStore.getOrCreate(conversation.id, conversation.messages, conversation.agentRuntime);
+    const appliedWorktree = applyWorktreeSession(conversation.agentRuntime?.worktreeSession || null);
+    if (!appliedWorktree && conversation.agentRuntime?.worktreeSession) {
+      this.activeEngine.setWorktreeSession(null);
+    }
+    this.changeController.refreshWorkspaceContext();
+    const changeState = this.changeStatesByConversation.get(conversation.id) || this.changeStateStore.read(conversation.id);
+    if (changeState) {
+      this.changeStatesByConversation.set(conversation.id, changeState);
+    }
+    this.changeController.restoreState(changeState || null);
+    this.chatHistory.splice(0, this.chatHistory.length, ...conversation.messages);
+    this.chatArtifacts = Array.isArray(conversation.artifactEvents)
+      ? conversation.artifactEvents.map((artifact) => clonePersistedArtifact(artifact))
+      : [];
+    this.chatRunController.restoreConversationState({
+      messages: conversation.messages,
+      suggestions: conversation.suggestions,
+      suggestionsState: conversation.suggestionsState,
+      suggestionsSummary: conversation.suggestionsSummary,
+      traceRuns: conversation.traceRuns,
+      artifactEvents: conversation.artifactEvents,
+    });
+    const checkpointState = this.checkpointStatesByConversation.get(conversation.id) || this.checkpointStateStore.read(conversation.id);
+    if (checkpointState) {
+      this.checkpointStatesByConversation.set(conversation.id, checkpointState);
+    }
+    this.checkpointController.restoreState(checkpointState || null);
+    this.sendConversationSessions();
+    this.sendActiveConversationState(true);
+    this.sendRuntimeState();
+    this.checkpointController.sendCheckpointsList();
+  }
+
+  private commitRevertBranchIfNeeded() {
+    const committedBranch = this.checkpointController.commitRevertBranch();
+    if (committedBranch) {
+      this.scheduleChangeStatePersist();
+      this.scheduleCheckpointStatePersist();
+      this.post({ type: 'checkpointBranchCommitted', ...committedBranch });
+    }
+  }
+
+  private scheduleChangeStatePersist() {
+    const conversationId = this.activeConversationId;
+    const state = this.changeController.snapshotState();
+    this.changeStatesByConversation.set(conversationId, state);
+    this.changePersistPayload = { conversationId, state };
+    if (this.changePersistTimer) return;
+    this.changePersistTimer = setTimeout(() => {
+      const payload = this.changePersistPayload;
+      this.changePersistTimer = null;
+      this.changePersistPayload = null;
+      if (!payload) return;
+      void this.persistChangeStateNow(payload.conversationId, payload.state);
+    }, 250);
+  }
+
+  private async persistChangeStateNow(conversationId: string, state: WorkspaceChangeControllerState) {
+    this.changeStatesByConversation.set(conversationId, state);
+    await this.changeStateStore.write(conversationId, state);
+  }
+
+  private scheduleCheckpointStatePersist() {
+    const conversationId = this.activeConversationId;
+    const state = this.checkpointController.snapshotState();
+    this.checkpointStatesByConversation.set(conversationId, state);
+    this.checkpointPersistPayload = { conversationId, state };
+    if (this.checkpointPersistTimer) return;
+    this.checkpointPersistTimer = setTimeout(() => {
+      const payload = this.checkpointPersistPayload;
+      this.checkpointPersistTimer = null;
+      this.checkpointPersistPayload = null;
+      if (!payload) return;
+      void this.persistCheckpointStateNow(payload.conversationId, payload.state);
+    }, 250);
+  }
+
+  private async persistCheckpointStateNow(conversationId: string, state: CheckpointControllerState) {
+    this.checkpointStatesByConversation.set(conversationId, state);
+    await this.checkpointStateStore.write(conversationId, state);
+  }
+
+  private syncActiveConversationEngine() {
+    this.engineStore.sync(this.activeConversationId, this.chatHistory, this.activeEngine.snapshotRuntime());
+  }
+
+  private resetAgentEngines() {
+    this.engineStore.clear();
+    this.activeEngine = this.engineStore.getOrCreate(this.activeConversationId, this.chatHistory, null);
+  }
+
+  private async persistConversationRuntime(conversationId: string) {
+    if (conversationId === this.activeConversationId) {
+      await this.conversationStore.updateConversationRuntime(conversationId, this.activeEngine.snapshotRuntime());
+      return;
+    }
+
+    const engine = this.engineStore.get(conversationId);
+    if (!engine) return;
+    await this.conversationStore.updateConversationRuntime(conversationId, engine.snapshotRuntime());
+  }
+
+  private async handleEngineRuntimeChanged(conversationId: string, kind: 'runtime' | 'progress' = 'runtime') {
+    if (kind !== 'progress') {
+      await this.persistConversationRuntime(conversationId);
+    }
+    if (conversationId === this.activeConversationId) {
+      const appliedWorktree = applyWorktreeSession(this.activeEngine.snapshotRuntime().worktreeSession || null);
+      if (!appliedWorktree && this.activeEngine.snapshotRuntime().worktreeSession) {
+        this.activeEngine.setWorktreeSession(null);
+      }
+      this.changeController.refreshWorkspaceContext();
+      this.sendRuntimeState();
+      void this.sendTasksState();
+    }
+  }
+
+  private sendRuntimeState() {
+    const runtime = this.activeEngine.snapshotRuntime();
+    const config = readConfig();
+    this.post({
+      type: 'runtimeState',
+      mode: runtime.mode,
+      awaitingPlanApproval: runtime.awaitingPlanApproval,
+      pendingApproval: runtime.pendingApproval,
+      pendingQuestion: runtime.pendingQuestion,
+      todos: runtime.todos,
+      progress: runtime.progress,
+      sessionMemory: runtime.sessionMemory,
+      autoApproval: config.autoApproval,
+    });
+  }
+
+  private sendComposerPermissionsState() {
+    this.post({
+      type: 'composerPermissionsState',
+      autoApproval: readConfig().autoApproval,
+    });
+  }
+
+  private recordArtifactMessage(message: ExtensionToWebviewMessage): void {
+    const artifact = toPersistedArtifact(message);
+    if (!artifact) return;
+    const runId = this.chatRunController.getActiveTraceRunId();
+    if (runId && !artifact.runId) {
+      artifact.runId = runId;
+    }
+    this.chatArtifacts.push(artifact);
+    if (this.chatArtifacts.length > 240) {
+      this.chatArtifacts = this.chatArtifacts.slice(-240);
+    }
+    this.scheduleArtifactPersist();
+  }
+
+  private scheduleArtifactPersist(): void {
+    if (this.artifactPersistTimer) return;
+    this.artifactPersistTimer = setTimeout(() => {
+      this.artifactPersistTimer = null;
+      void this.persistActiveConversation();
+    }, 250);
+  }
+
+  private getTasksRootPath(): string {
+    return getAgentWorkspaceRootPath()
+      || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath
+      || process.cwd();
+  }
+
+  private startTasksPolling(): void {
+    this.stopTasksPolling();
+    this.tasksPollTimer = setInterval(() => {
+      void this.sendTasksState();
+    }, 4000);
+  }
+
+  private stopTasksPolling(): void {
+    if (!this.tasksPollTimer) return;
+    clearInterval(this.tasksPollTimer);
+    this.tasksPollTimer = null;
+  }
+
+  private async sendTasksState(): Promise<void> {
+    if (!this.view || this.tasksRefreshInFlight) return;
+    this.tasksRefreshInFlight = true;
+    try {
+      const rootPath = this.getTasksRootPath();
+      const tasks = await listTaskRecords(rootPath);
+      const activeTasks = tasks.filter(isActiveTask);
+      const historyTasks = tasks.filter((task) => !isActiveTask(task));
+      const activeCount = activeTasks.length;
+      const totalCount = tasks.length;
+      const activeShown = activeTasks.slice(0, 12);
+      const historyShown = historyTasks.slice(0, Math.max(0, 12 - activeShown.length));
+      const items = await Promise.all([...activeShown, ...historyShown].map((task) => this.toTaskMessage(task, rootPath)));
+      const shownCount = items.length;
+      const historyCount = Math.max(0, totalCount - activeCount);
+      const summary = totalCount === 0
+        ? 'Нет фоновых задач'
+        : activeCount > 0
+          ? historyCount > 0
+            ? shownCount < totalCount
+              ? `${activeCount} активных • ${historyCount} в истории • показано ${shownCount} из ${totalCount}`
+              : `${activeCount} активных • ${historyCount} в истории`
+            : `${activeCount} активных задач`
+          : shownCount < totalCount
+            ? `${totalCount} задач в истории • показано ${shownCount}`
+            : `${totalCount} задач в истории`;
+
+      this.post({
+        type: 'tasksState',
+        tasks: items,
+        summary,
+        activeCount,
+        totalCount,
+        shownCount,
+        updatedAt: Date.now(),
+      });
+    } finally {
+      this.tasksRefreshInFlight = false;
+    }
+  }
+
+  private async toTaskMessage(task: AgentTaskRecord, rootPath: string) {
+    const preview = await buildTaskPreview(task);
+    return {
+      id: task.id,
+      kind: task.kind,
+      subject: task.subject,
+      description: task.description,
+      ...(task.activeForm ? { activeForm: task.activeForm } : {}),
+      status: task.status,
+      ...(task.command ? { command: task.command } : {}),
+      ...(task.cwd ? { cwd: task.cwd } : {}),
+      ...(task.note ? { note: task.note } : {}),
+      taskFilePath: toTaskWorkspaceRelativePath(getTaskFilePath(task.id, rootPath), rootPath),
+      ...(task.stdoutPath ? { stdoutPath: toTaskWorkspaceRelativePath(task.stdoutPath, rootPath) } : {}),
+      ...(task.stderrPath ? { stderrPath: toTaskWorkspaceRelativePath(task.stderrPath, rootPath) } : {}),
+      ...(preview.stdout ? { stdoutPreview: preview.stdout } : {}),
+      ...(preview.stderr ? { stderrPreview: preview.stderr } : {}),
+      ...(typeof task.exitCode === 'number' ? { exitCode: task.exitCode } : {}),
+      ...(task.signal !== undefined ? { signal: task.signal || null } : {}),
+      createdAt: task.createdAt,
+      updatedAt: task.updatedAt,
+      ...(task.startedAt ? { startedAt: task.startedAt } : {}),
+      ...(task.finishedAt ? { finishedAt: task.finishedAt } : {}),
+      ...(task.stopRequestedAt ? { stopRequestedAt: task.stopRequestedAt } : {}),
+      ...(preview.combined ? { preview: preview.combined } : {}),
+    };
+  }
+}
+
+function toPersistedArtifact(message: ExtensionToWebviewMessage): PersistedChatArtifact | null {
+  if (message.type === 'status') {
+    return { kind: 'statusMessage', payload: { text: sanitizeArtifactPayload(message.text) as string } };
+  }
+
+  if (message.type === 'error') {
+    return { kind: 'errorMessage', payload: { text: sanitizeArtifactPayload(message.text) as string } };
+  }
+
+  if (message.type === 'fileChange') {
+    return {
+      kind: 'fileChange',
+      payload: {
+        changeId: message.changeId,
+        ...(message.step !== undefined ? { step: String(message.step) } : {}),
+        filePath: message.filePath,
+        changeType: message.changeType,
+        tool: message.tool,
+        ...(message.summary ? { summary: message.summary } : {}),
+        ...(message.stats ? { stats: { ...message.stats } } : {}),
+        oldSnippet: message.oldSnippet,
+        newSnippet: message.newSnippet,
+        cellIdx: message.cellIdx,
+        diffLines: Array.isArray(message.diffLines) ? message.diffLines.map((line) => ({ ...line })) : [],
+      },
+    };
+  }
+
+  if (message.type === 'changeAccepted' || message.type === 'changeRejected') {
+    return {
+      kind: 'changeStatus',
+      payload: {
+        type: message.type,
+        changeId: message.changeId,
+        ...(message.error ? { error: message.error } : {}),
+      },
+    };
+  }
+
+  if (message.type === 'approvalRequest') {
+    return { kind: 'approvalRequest', payload: sanitizeArtifactPayload(message.request) as any };
+  }
+
+  if (message.type === 'approvalResolved') {
+    return { kind: 'approvalResolved', payload: sanitizeArtifactPayload(message.result) as any };
+  }
+
+  if (message.type === 'questionRequest') {
+    return { kind: 'questionRequest', payload: sanitizeArtifactPayload(message.request) as any };
+  }
+
+  if (message.type === 'questionResolved') {
+    return { kind: 'questionResolved', payload: sanitizeArtifactPayload(message.result) as any };
+  }
+
+  if (message.type === 'checkpoint') {
+    return { kind: 'checkpoint', payload: sanitizeArtifactPayload(message) as any };
+  }
+
+  if (message.type === 'checkpointUpdated') {
+    return { kind: 'checkpointUpdated', payload: sanitizeArtifactPayload(message) as any };
+  }
+
+  if (message.type === 'checkpointReverted') {
+    return { kind: 'checkpointReverted', payload: sanitizeArtifactPayload(message) as any };
+  }
+
+  if (message.type === 'undoRevertDone') {
+    return { kind: 'undoRevertDone', payload: sanitizeArtifactPayload(message) as any };
+  }
+
+  if (message.type === 'checkpointBranchCommitted') {
+    return { kind: 'checkpointBranchCommitted', payload: sanitizeArtifactPayload(message) as any };
+  }
+
+  return null;
+}
+
+function clonePersistedArtifact(artifact: PersistedChatArtifact): PersistedChatArtifact {
+  return {
+    kind: artifact.kind,
+    ...(typeof artifact.runId === 'string' && artifact.runId.trim() ? { runId: artifact.runId.trim().slice(0, 80) } : {}),
+    payload: sanitizeArtifactPayload(artifact.payload) as any,
+  };
+}
+
+function sanitizeArtifactPayload(value: any): any {
+  if (value === null || value === undefined) return value;
+  if (typeof value === 'string') return value.slice(0, 4000);
+  if (typeof value === 'number' || typeof value === 'boolean') return value;
+  if (Array.isArray(value)) return value.slice(0, 80).map((item) => sanitizeArtifactPayload(item));
+  if (typeof value !== 'object') return String(value).slice(0, 400);
+  const output: Record<string, any> = {};
+  for (const [key, entry] of Object.entries(value).slice(0, 80)) {
+    output[key] = sanitizeArtifactPayload(entry);
+  }
+  return output;
+}
+
+function shouldPersistCheckpointState(message: ExtensionToWebviewMessage): boolean {
+  return message.type === 'fileChange'
+    || message.type === 'checkpoint'
+    || message.type === 'checkpointUpdated'
+    || message.type === 'checkpointReverted'
+    || message.type === 'undoRevertDone'
+    || message.type === 'checkpointBranchCommitted';
+}
+
+function shouldPersistChangeState(message: ExtensionToWebviewMessage): boolean {
+  return message.type === 'fileChange'
+    || message.type === 'changeAccepted'
+    || message.type === 'changeRejected'
+    || message.type === 'checkpointReverted'
+    || message.type === 'undoRevertDone';
+}
+
+function isActiveTask(task: AgentTaskRecord): boolean {
+  return task.status === 'pending' || task.status === 'in_progress';
+}
+
+async function buildTaskPreview(task: AgentTaskRecord): Promise<{
+  stdout?: string;
+  stderr?: string;
+  combined?: string;
+}> {
+  const stdout = await readTaskTail(task.stdoutPath);
+  const stderr = await readTaskTail(task.stderrPath);
+  const parts = [
+    stdout ? `stdout\n${stdout}` : '',
+    stderr ? `stderr\n${stderr}` : '',
+  ].filter(Boolean);
+  return {
+    ...(stdout ? { stdout } : {}),
+    ...(stderr ? { stderr } : {}),
+    ...(parts.length > 0 ? { combined: parts.join('\n\n') } : {}),
+  };
+}
+
+async function readTaskTail(filePath: string | undefined, maxBytes = 3200): Promise<string> {
+  if (!filePath) return '';
+  let handle: fs.FileHandle | null = null;
+  try {
+    handle = await fs.open(filePath, 'r');
+    const stat = await handle.stat();
+    const size = Number(stat.size || 0);
+    const start = Math.max(0, size - maxBytes);
+    const length = Math.max(0, size - start);
+    if (length === 0) return '';
+    const buffer = Buffer.alloc(length);
+    await handle.read(buffer, 0, length, start);
+    const text = buffer.toString('utf8').trim();
+    const lines = text.split('\n');
+    return lines.slice(-12).join('\n').trim();
+  } catch {
+    return '';
+  } finally {
+    try {
+      await handle?.close();
+    } catch {
+      // Ignore close errors.
+    }
+  }
 }

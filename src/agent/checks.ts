@@ -1,5 +1,3 @@
-export const MIN_TOOL_TYPES_BEFORE_ANSWER = 1;
-
 function getReadTopDirs(usedCalls: Set<string>): string[] {
   const dirs = new Set<string>();
   for (const key of usedCalls) {
@@ -39,11 +37,6 @@ function getReadRangeMaxPerFile(usedCalls: Set<string>): number {
   let max = 0;
   for (const v of counts.values()) max = Math.max(max, v);
   return max;
-}
-
-export function checkToolDiversity(usedCalls: Set<string>): string | null {
-  void usedCalls;
-  return null;
 }
 
 export function checkMonotony(usedCalls: Set<string>, modelUsedTools?: Set<string>): string | null {

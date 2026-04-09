@@ -17,4 +17,4 @@ export const MAX_FILE_SIZE = 500_000;
 export const MAX_TOOL_RESULT_CHARS = 8000;
 export const MAX_CONTEXT_CHARS = 100_000;
 
-export const EXTENSION_NAME = 'AI Assistant';
+export const EXTENSION_NAME = 'ИИ Кодогенератор';

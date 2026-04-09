@@ -1,0 +1,677 @@
+/* ── Shell Confirm Cards ── */
+.trace-step-children > .approval-request {
+  margin-top: 10px;
+}
+
+.approval-request.is-collapsed .pc-meta,
+.approval-request.is-collapsed .sc-header,
+.approval-request.is-collapsed .approval-summary,
+.approval-request.is-collapsed .approval-chip-row,
+.approval-request.is-collapsed .approval-file-preview,
+.approval-request.is-collapsed .pc-plan-input,
+.approval-request.is-collapsed .pc-feedback-input,
+.approval-request.is-collapsed .question-block,
+.approval-request.is-collapsed .question-validation {
+  display: none;
+}
+
+.approval-request.is-collapsed .sc-cwd {
+  display: none;
+}
+
+.approval-request.is-collapsed .fa-path,
+.approval-request.is-collapsed .sc-cmd-row {
+  margin-bottom: 0;
+}
+
+.shell-confirm {
+  border-left-color: var(--vscode-terminal-ansiYellow, #eab308) !important;
+}
+.shell-confirm.sc-resolved {
+  opacity: 0.6;
+  border-left-color: var(--vscode-panel-border, rgba(255,255,255,0.15)) !important;
+}
+.sc-header {
+  font-weight: 700;
+  font-size: 12px;
+  color: var(--vscode-terminal-ansiYellow, #eab308);
+  margin-bottom: 6px;
+}
+.approval-summary {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--vscode-foreground, #d4d4d4);
+  margin-bottom: 8px;
+}
+.approval-chip-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.approval-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  background: rgba(255,255,255,0.06);
+  color: var(--vscode-descriptionForeground, #a8a8a8);
+  border: 1px solid rgba(255,255,255,0.08);
+}
+.approval-chip.is-safe {
+  background: rgba(34, 197, 94, 0.12);
+  color: var(--vscode-terminal-ansiGreen, #22c55e);
+}
+.approval-chip.is-caution {
+  background: rgba(234, 179, 8, 0.12);
+  color: var(--vscode-terminal-ansiYellow, #eab308);
+}
+.approval-chip.is-danger {
+  background: rgba(239, 68, 68, 0.12);
+  color: var(--vscode-terminal-ansiRed, #ef4444);
+}
+.approval-chip.is-shell-kind,
+.approval-chip.is-file,
+.approval-chip.is-notebook,
+.approval-chip.is-question,
+.approval-chip.is-cwd {
+  background: rgba(96, 165, 250, 0.1);
+  color: var(--vscode-terminal-ansiBlue, #60a5fa);
+}
+.approval-chip.is-question-meta {
+  background: rgba(34, 211, 238, 0.12);
+  color: var(--vscode-terminal-ansiCyan, #22d3ee);
+}
+.approval-chip.is-lines,
+.approval-chip.is-bytes,
+.approval-chip.is-delta {
+  background: rgba(168, 85, 247, 0.1);
+  color: var(--vscode-terminal-ansiMagenta, #c084fc);
+}
+.sc-cmd-row {
+  display: flex;
+  align-items: center;
+  background: rgba(255,255,255,0.05);
+  border-radius: 4px;
+  padding: 2px 6px;
+  gap: 6px;
+}
+.sc-cmd-prefix {
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 13px;
+  color: var(--vscode-terminal-ansiGreen, #22c55e);
+  user-select: none;
+  flex-shrink: 0;
+}
+.sc-cmd-input {
+  flex: 1;
+  background: transparent;
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 3px;
+  padding: 5px 8px;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--vscode-editor-foreground, #d4d4d4);
+  outline: none;
+}
+.sc-cmd-input:focus {
+  border-color: var(--vscode-focusBorder, #007fd4);
+}
+.sc-cmd-input.sc-cmd-locked {
+  border-color: transparent;
+  opacity: 0.7;
+  cursor: default;
+}
+.sc-cwd {
+  font-size: 10px;
+  color: var(--vscode-descriptionForeground, #888);
+  margin-top: 2px;
+}
+.sc-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+.sc-status { font-size: 12px; font-weight: 600; }
+.sc-approved { color: var(--vscode-terminal-ansiGreen, #22c55e); }
+.sc-denied { color: var(--vscode-terminal-ansiRed, #f87171); }
+.approval-status-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.approval-status-detail {
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--vscode-descriptionForeground, #9ca3af);
+  word-break: break-word;
+}
+
+/* ── Plan Confirm Cards ── */
+.plan-confirm {
+  border-left-color: var(--vscode-terminal-ansiBlue, #3b82f6) !important;
+}
+.plan-confirm.pc-resolved {
+  opacity: 0.72;
+}
+.pc-header {
+  font-weight: 700;
+  font-size: 12px;
+  color: var(--vscode-terminal-ansiBlue, #60a5fa);
+  margin-bottom: 4px;
+}
+.pc-meta {
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground, #9ca3af);
+  margin-bottom: 8px;
+}
+.pc-plan-input,
+.pc-feedback-input {
+  width: 100%;
+  resize: vertical;
+  border-radius: 6px;
+  border: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.12));
+  background: rgba(255,255,255,0.04);
+  color: var(--vscode-editor-foreground, #d4d4d4);
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 8px 10px;
+  outline: none;
+}
+.pc-plan-input {
+  min-height: 220px;
+}
+.pc-feedback-input {
+  min-height: 72px;
+  margin-top: 8px;
+}
+.pc-plan-input:focus,
+.pc-feedback-input:focus {
+  border-color: var(--vscode-focusBorder, #007fd4);
+}
+.pc-plan-input.pc-locked,
+.pc-feedback-input.pc-locked {
+  opacity: 0.75;
+}
+.pc-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+.pc-status {
+  font-size: 12px;
+  font-weight: 600;
+}
+.pc-approved {
+  color: var(--vscode-terminal-ansiGreen, #22c55e);
+}
+.pc-rejected {
+  color: var(--vscode-terminal-ansiYellow, #eab308);
+}
+
+.question-confirm {
+  border-left-color: var(--vscode-terminal-ansiCyan, #22d3ee) !important;
+}
+.question-block {
+  border: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.12));
+  border-radius: 8px;
+  padding: 10px;
+  margin-top: 8px;
+  background: rgba(255,255,255,0.03);
+}
+.question-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--vscode-foreground, #d4d4d4);
+  margin-bottom: 8px;
+}
+.question-options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.question-option {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(255,255,255,0.08);
+  background: rgba(255,255,255,0.02);
+}
+.question-option-custom {
+  align-items: stretch;
+}
+.question-option input {
+  margin-top: 2px;
+}
+.question-option-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.question-option-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--vscode-foreground, #d4d4d4);
+}
+.question-option-desc {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--vscode-descriptionForeground, #9ca3af);
+}
+.question-custom-input {
+  width: 100%;
+  min-height: 56px;
+  margin-top: 6px;
+  padding: 8px 10px;
+  resize: vertical;
+  border-radius: 6px;
+  border: 1px solid var(--vscode-input-border, rgba(255,255,255,0.1));
+  background: var(--vscode-input-background, rgba(255,255,255,0.03));
+  color: var(--vscode-input-foreground, var(--vscode-foreground, #d4d4d4));
+  font: inherit;
+  line-height: 1.45;
+}
+.question-custom-input:focus {
+  outline: none;
+  border-color: var(--vscode-focusBorder, #007acc);
+}
+.question-custom-input.pc-locked {
+  opacity: 0.8;
+}
+.question-validation {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--vscode-terminal-ansiYellow, #eab308);
+}
+
+/* ── File Approval Cards ── */
+.file-approval {
+  border-left-color: var(--vscode-terminal-ansiBlue, #3b82f6) !important;
+}
+.fa-header {
+  font-weight: 700;
+  font-size: 12px;
+  color: var(--vscode-terminal-ansiBlue, #60a5fa);
+  margin-bottom: 4px;
+}
+.fa-path {
+  font-family: var(--vscode-editor-font-family, 'Cascadia Code', monospace);
+  font-size: 12px;
+  color: var(--vscode-textLink-foreground, #4fc1ff);
+  word-break: break-all;
+  margin-bottom: 6px;
+}
+.fa-meta-row {
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground, #9ca3af);
+  margin-bottom: 8px;
+}
+.fc-summary {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--vscode-descriptionForeground, #a0a7b4);
+  margin: 4px 0 8px;
+}
+.fc-chip-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: -2px 0 8px;
+}
+.fc-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.15px;
+  background: rgba(255,255,255,0.06);
+  color: var(--vscode-descriptionForeground, #a8a8a8);
+  border: 1px solid rgba(255,255,255,0.08);
+}
+.fc-chip.is-add {
+  background: rgba(34, 197, 94, 0.12);
+  color: var(--vscode-terminal-ansiGreen, #22c55e);
+}
+.fc-chip.is-del {
+  background: rgba(239, 68, 68, 0.12);
+  color: var(--vscode-terminal-ansiRed, #ef4444);
+}
+.fc-chip.is-lines,
+.fc-chip.is-cell {
+  background: rgba(96, 165, 250, 0.1);
+  color: var(--vscode-terminal-ansiBlue, #60a5fa);
+}
+.approval-file-preview {
+  display: grid;
+  gap: 8px;
+}
+.approval-file-block {
+  border: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.1));
+  border-radius: 6px;
+  overflow: hidden;
+}
+.approval-file-block.is-old {
+  background: rgba(255, 80, 80, 0.06);
+}
+.approval-file-block.is-new {
+  background: rgba(80, 255, 80, 0.06);
+}
+.approval-file-label {
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--vscode-descriptionForeground, #888);
+}
+.approval-file-code {
+  margin: 0;
+  padding: 0 8px 8px;
+  max-height: 220px;
+  overflow: auto;
+  font-family: var(--vscode-editor-font-family, 'Cascadia Code', monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--vscode-editor-foreground, #d4d4d4);
+}
+
+/* ── File Change Cards ── */
+.message.file-change {
+  background: var(--vscode-editor-background, #1e1e1e);
+  border: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.15));
+  border-left: 3px solid var(--vscode-terminal-ansiBlue, #3b82f6);
+  padding: 10px 12px;
+  margin: 6px 0;
+  border-radius: 6px;
+  animation: fadeIn 0.2s ease;
+}
+.message.file-change.fc-accepted {
+  border-left-color: var(--vscode-terminal-ansiGreen, #22c55e);
+  opacity: 0.65;
+}
+.message.file-change.fc-rejected {
+  border-left-color: var(--vscode-terminal-ansiRed, #ef4444);
+  opacity: 0.65;
+}
+.message.file-change.fc-reverted {
+  border-left-color: var(--vscode-editorLineNumber-foreground, #858585);
+  opacity: 0.45;
+}
+.fc-status-reverted {
+  color: var(--vscode-editorLineNumber-foreground, #858585);
+  font-style: italic;
+}
+.fc-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+.fc-badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  white-space: nowrap;
+}
+.fc-badge-edit { background: var(--vscode-terminal-ansiYellow, #eab308); color: #000; }
+.fc-badge-create { background: var(--vscode-terminal-ansiGreen, #22c55e); color: #000; }
+.fc-badge-overwrite { background: var(--vscode-terminal-ansiYellow, #eab308); color: #000; }
+.fc-badge-delete { background: var(--vscode-terminal-ansiRed, #ef4444); color: #fff; }
+.fc-badge-notebook-edit-cell { background: var(--vscode-terminal-ansiCyan, #06b6d4); color: #000; }
+.fc-badge-notebook-new-cell { background: var(--vscode-terminal-ansiGreen, #22c55e); color: #000; }
+.fc-path {
+  font-family: var(--vscode-editor-font-family, 'Cascadia Code', monospace);
+  font-size: 12px;
+  color: var(--vscode-textLink-foreground, #4fc1ff);
+  word-break: break-all;
+}
+.fc-tool {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--vscode-badge-background, #4d4d4d);
+  color: var(--vscode-badge-foreground, #fff);
+  white-space: nowrap;
+}
+.fc-diff {
+  margin: 8px 0;
+  border-radius: 4px;
+  overflow: hidden;
+  border: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.1));
+}
+.fc-diff-old {
+  background: rgba(255, 80, 80, 0.08);
+  border-bottom: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.08));
+}
+.fc-diff-new {
+  background: rgba(80, 255, 80, 0.08);
+}
+.fc-diff-label {
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--vscode-descriptionForeground, #888);
+  user-select: none;
+}
+.fc-diff-old .fc-diff-label { color: var(--vscode-terminal-ansiRed, #f87171); }
+.fc-diff-new .fc-diff-label { color: var(--vscode-terminal-ansiGreen, #4ade80); }
+.fc-diff-code {
+  margin: 0;
+  padding: 4px 8px 8px;
+  font-family: var(--vscode-editor-font-family, 'Cascadia Code', monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 200px;
+  overflow-y: auto;
+  color: var(--vscode-editor-foreground, #ccc);
+}
+/* — Unified diff (patch view) — */
+.fc-unified-diff {
+  background: var(--vscode-editor-background, #1e1e1e);
+  max-height: 400px;
+  overflow: auto;
+}
+.diff-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--vscode-editor-font-family, 'Cascadia Code', monospace);
+  font-size: 12px;
+  line-height: 1.55;
+  table-layout: fixed;
+}
+.diff-ln {
+  width: 40px;
+  min-width: 40px;
+  max-width: 40px;
+  padding: 0 6px;
+  text-align: right;
+  color: var(--vscode-editorLineNumber-foreground, #858585);
+  user-select: none;
+  vertical-align: top;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.diff-sign {
+  width: 16px;
+  min-width: 16px;
+  max-width: 16px;
+  padding: 0 2px 0 4px;
+  text-align: center;
+  font-weight: 700;
+  user-select: none;
+  vertical-align: top;
+}
+.diff-code {
+  padding: 0 8px 0 2px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--vscode-editor-foreground, #d4d4d4);
+}
+.diff-row-add { background: rgba(35, 134, 54, 0.20); }
+.diff-row-add .diff-sign { color: var(--vscode-terminal-ansiGreen, #4ade80); }
+.diff-row-add .diff-code { color: var(--vscode-terminal-ansiGreen, #4ade80); }
+.diff-row-del { background: rgba(218, 54, 51, 0.20); }
+.diff-row-del .diff-sign { color: var(--vscode-terminal-ansiRed, #f87171); }
+.diff-row-del .diff-code { color: var(--vscode-terminal-ansiRed, #f87171); }
+.diff-row-context { background: transparent; }
+.diff-row-sep {
+  background: var(--vscode-editor-background, #1e1e1e);
+}
+.diff-row-sep .diff-ln,
+.diff-row-sep .diff-sign { opacity: 0; }
+.diff-sep-text {
+  text-align: center !important;
+  color: var(--vscode-editorLineNumber-foreground, #858585);
+  font-style: italic;
+  font-size: 11px;
+  padding: 2px 0;
+  letter-spacing: 3px;
+}
+
+.fc-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+.fc-btn {
+  font-size: 11px !important;
+  padding: 3px 10px !important;
+}
+.fc-status {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 0;
+}
+.fc-status-accepted { color: var(--vscode-terminal-ansiGreen, #4ade80); }
+.fc-status-rejected { color: var(--vscode-terminal-ansiRed, #f87171); }
+
+/* ── Checkpoints ── */
+.cp-inline {
+  display: block;
+}
+.message.cp-marker {
+  background: transparent;
+  border: none;
+  padding: 2px 0 0;
+}
+.cp-card {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.12));
+  background: rgba(255,255,255,0.025);
+}
+.message.cp-marker .cp-card {
+  background: var(--vscode-editor-background, #1e1e1e);
+}
+.cp-main {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.cp-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--vscode-terminal-ansiBlue, #60a5fa);
+  background: rgba(96, 165, 250, 0.10);
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid rgba(96, 165, 250, 0.30);
+  white-space: nowrap;
+}
+.cp-info {
+  font-size: 10px;
+  color: var(--vscode-descriptionForeground, #888);
+  white-space: nowrap;
+}
+.cp-state {
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.12);
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--vscode-descriptionForeground, rgba(255,255,255,0.72));
+  background: rgba(255,255,255,0.04);
+}
+.cp-state.is-running {
+  color: #d29922;
+  border-color: rgba(210, 153, 34, 0.28);
+  background: rgba(210, 153, 34, 0.08);
+}
+.cp-state.is-completed {
+  color: #3fb950;
+  border-color: rgba(63, 185, 80, 0.28);
+  background: rgba(63, 185, 80, 0.08);
+}
+.cp-state.is-failed {
+  color: #f85149;
+  border-color: rgba(248, 81, 73, 0.30);
+  background: rgba(248, 81, 73, 0.08);
+}
+.cp-state.is-stopped {
+  color: var(--vscode-descriptionForeground, rgba(255,255,255,0.72));
+  border-color: rgba(255,255,255,0.12);
+  background: rgba(255,255,255,0.04);
+}
+.cp-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-left: auto;
+}
+.cp-active .cp-card {
+  border-color: rgba(96, 165, 250, 0.42);
+  box-shadow: 0 0 0 1px rgba(96, 165, 250, 0.12) inset;
+}
+.cp-revert-btn {
+  font-size: 10px !important;
+  padding: 2px 8px !important;
+  white-space: nowrap;
+}
+.cp-undo-btn {
+  color: var(--vscode-terminal-ansiYellow, #eab308) !important;
+  border-color: var(--vscode-terminal-ansiYellow, #eab308) !important;
+  white-space: nowrap;
+}
+.cp-edit-request-btn,
+.cp-repeat-request-btn {
+  white-space: nowrap;
+}
+.cp-hidden-by-revert {
+  display: none !important;
+}
+.cp-preview {
+  font-size: 10px;
+  color: var(--vscode-descriptionForeground, #666);
+  margin-top: 4px;
+  padding-left: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}

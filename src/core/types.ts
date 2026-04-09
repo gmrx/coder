@@ -43,10 +43,28 @@ export interface DependencyEdge {
   to: string;
 }
 
+export interface AssistantAutoApprovalConfig {
+  fileCreate: boolean;
+  fileEdit: boolean;
+  fileDelete: boolean;
+  webFetch: boolean;
+  shell: boolean;
+  worktree: boolean;
+  mcp: boolean;
+}
+
 export interface AssistantConfig {
   apiBaseUrl: string;
   apiKey: string;
   model: string;
   embeddingsModel: string;
   rerankModel: string;
+  systemPrompt: string;
+  mcpConfigPath: string;
+  mcpServers: Record<string, unknown>;
+  mcpDisabledTools: string[];
+  mcpTrustedTools: string[];
+  webTrustedHosts: string[];
+  webBlockedHosts: string[];
+  autoApproval: AssistantAutoApprovalConfig;
 }

@@ -1,0 +1,23 @@
+:root {
+  --mmd-radius-lg: 14px;
+  --mmd-radius-md: 10px;
+  --mmd-radius-sm: 8px;
+  --mmd-space-1: 6px;
+  --mmd-space-2: 10px;
+  --mmd-space-3: 14px;
+  --mmd-space-4: 18px;
+  --mmd-space-5: 24px;
+  --mmd-surface: color-mix(in srgb, var(--vscode-editor-background, #10151d) 92%, white 8%);
+  --mmd-surface-strong: color-mix(in srgb, var(--vscode-editorWidget-background, #17202b) 94%, white 6%);
+  --mmd-panel: color-mix(in srgb, var(--vscode-sideBar-background, #141b25) 92%, white 8%);
+  --mmd-border: color-mix(in srgb, var(--vscode-panel-border, #2b3e52) 88%, white 12%);
+  --mmd-border-strong: color-mix(in srgb, var(--vscode-panel-border, #2b3e52) 78%, var(--vscode-focusBorder, #5ea1ff) 22%);
+  --mmd-foreground: var(--vscode-foreground, #e8eef8);
+  --mmd-muted: var(--vscode-descriptionForeground, #94a3b8);
+  --mmd-accent: var(--vscode-focusBorder, #5ea1ff);
+  --mmd-accent-soft: color-mix(in srgb, var(--vscode-textLink-foreground, #7cc6ff) 72%, white 28%);
+  --mmd-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  --mmd-grid: linear-gradient(to right, rgba(255, 255, 255, 0.04) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.04) 1px, transparent 1px);
+}
+

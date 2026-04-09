@@ -11,3 +11,6 @@ dist/
 Thumbs.db
 
 .vscode-test/
+srctempagent/
+.cursorcoder/tasks/
+.cursorcoder/session-memory/

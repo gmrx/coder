@@ -1,0 +1,40 @@
+:root {
+  --radius: 5px;
+  --gap: 10px;
+  --transition: 0.15s ease;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0; padding: 0;
+  font-family: var(--vscode-font-family, system-ui, -apple-system, sans-serif);
+  font-size: 13px;
+  color: var(--vscode-foreground);
+  background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+}
+
+.root { display: flex; flex-direction: column; height: 100vh; }
+
+/* Tabs */
+.tabs {
+  display: flex;
+  border-bottom: 1px solid var(--vscode-panel-border, var(--vscode-editorGroup-border));
+  background: var(--vscode-sideBarSectionHeader-background, transparent);
+  flex-shrink: 0;
+}
+.tab {
+  flex: 1; padding: 8px 0; text-align: center;
+  font-size: 12px; font-weight: 500; cursor: pointer;
+  border: none; background: transparent;
+  color: var(--vscode-foreground); opacity: 0.6;
+  border-bottom: 2px solid transparent;
+  transition: all var(--transition);
+}
+.tab:hover { opacity: 0.85; }
+.tab.active { opacity: 1; border-bottom-color: var(--vscode-focusBorder, #007acc); }
+
+/* Views */
+.view { flex: 1; display: none; flex-direction: column; min-height: 0; }
+.view.active { display: flex; }
+

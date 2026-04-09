@@ -1,0 +1,116 @@
+/* ======== Markdown Content ======== */
+
+.message.assistant h1 {
+  font-size: 1.4em; margin: 16px 0 8px; padding-bottom: 4px;
+  border-bottom: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.12));
+  font-weight: 600;
+}
+.message.assistant h2 {
+  font-size: 1.25em; margin: 14px 0 6px; padding-bottom: 3px;
+  border-bottom: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.08));
+  font-weight: 600;
+}
+.message.assistant h3 { font-size: 1.1em; margin: 12px 0 4px; font-weight: 600; }
+.message.assistant h4 { font-size: 1.0em; margin: 10px 0 4px; font-weight: 600; }
+.message.assistant h5,
+.message.assistant h6 { font-size: 0.95em; margin: 8px 0 4px; font-weight: 600; opacity: 0.85; }
+.message.assistant h1:first-child,
+.message.assistant h2:first-child,
+.message.assistant h3:first-child { margin-top: 0; }
+.message.assistant p { margin: 6px 0; }
+.message.assistant p:first-child { margin-top: 0; }
+.message.assistant p:last-child { margin-bottom: 0; }
+.message.assistant strong { font-weight: 600; }
+.message.assistant em { font-style: italic; }
+.message.assistant ul,
+.message.assistant ol { padding-left: 20px; margin: 6px 0; }
+.message.assistant li { margin: 2px 0; }
+.message.assistant li > p { margin: 2px 0; }
+
+.message.assistant code:not(pre code) {
+  background: var(--vscode-textCodeBlock-background, rgba(255, 255, 255, 0.08));
+  padding: 1px 5px; border-radius: 3px;
+  font-family: var(--vscode-editor-font-family, 'Menlo', 'Monaco', 'Courier New', monospace);
+  font-size: 0.9em; word-break: break-word;
+}
+
+.message.assistant pre {
+  position: relative;
+  background: var(--vscode-textCodeBlock-background, #1e1e2e);
+  border-radius: var(--radius); padding: 0; margin: 8px 0;
+  overflow: hidden;
+  border: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.08));
+}
+.message.assistant pre code {
+  display: block; padding: 12px 14px; overflow-x: auto;
+  font-family: var(--vscode-editor-font-family, 'Menlo', 'Monaco', 'Courier New', monospace);
+  font-size: 12px; line-height: 1.55; tab-size: 2; white-space: pre;
+}
+
+.code-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 4px 10px;
+  background: rgba(255,255,255,0.03);
+  border-bottom: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.06));
+  font-size: 11px; opacity: 0.7;
+}
+.code-lang { font-weight: 500; }
+
+.copy-btn {
+  padding: 2px 8px; font-size: 11px; border-radius: 3px; border: none;
+  background: transparent; color: var(--vscode-foreground); cursor: pointer;
+  opacity: 0.5; transition: opacity 0.15s, background 0.15s;
+}
+.copy-btn:hover { opacity: 1; background: rgba(255,255,255,0.08); }
+
+.copy-btn-float {
+  position: absolute; top: 6px; right: 6px;
+  padding: 2px 8px; font-size: 11px; border-radius: 3px;
+  border: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.15));
+  background: var(--vscode-editor-background, #1e1e2e);
+  color: var(--vscode-foreground); cursor: pointer;
+  opacity: 0; transition: opacity 0.2s; z-index: 1;
+}
+.message.assistant pre:hover .copy-btn-float { opacity: 0.8; }
+.copy-btn-float:hover { opacity: 1 !important; background: var(--vscode-button-secondaryBackground); }
+
+.message.assistant table {
+  width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 12px;
+}
+.message.assistant th,
+.message.assistant td {
+  padding: 6px 10px;
+  border: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.12));
+  text-align: left;
+}
+.message.assistant th {
+  background: var(--vscode-sideBarSectionHeader-background, rgba(255,255,255,0.04));
+  font-weight: 600;
+}
+.message.assistant tr:nth-child(even) { background: rgba(255,255,255,0.015); }
+
+.message.assistant blockquote {
+  margin: 8px 0; padding: 4px 12px;
+  border-left: 3px solid var(--vscode-focusBorder, #007acc);
+  background: rgba(255,255,255,0.02);
+}
+.message.assistant blockquote p { margin: 4px 0; }
+
+.message.assistant hr {
+  border: none;
+  border-top: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.12));
+  margin: 12px 0;
+}
+
+.message.assistant a {
+  color: var(--vscode-textLink-foreground, #3794ff); text-decoration: none;
+}
+.message.assistant a:hover {
+  text-decoration: underline;
+  color: var(--vscode-textLink-activeForeground, #3794ff);
+}
+
+.message.assistant img { max-width: 100%; border-radius: var(--radius); margin: 4px 0; }
+
+/* Mermaid styles moved to media/mermaid/mermaid.css */
+

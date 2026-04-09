@@ -1,19 +1,25 @@
 import * as vscode from 'vscode';
 import { ChatMessage } from './core/types';
 import { EXTENSION_NAME } from './core/constants';
-import { initConfigStorage, readConfig, fetchModelsList, sendChatRequest, saveConfig } from './core/api';
+import { initConfigStorage, readConfig, sendChatRequest } from './core/api';
 import { isConfigValid, truncate } from './core/utils';
-import { AiChatViewProvider, AiOriginalContentProvider } from './ui/provider';
+import { AiChatViewProvider } from './ui/provider';
+import { AiOriginalContentProvider } from './ui/originalContentProvider';
+import { initMcpAuthStorage } from './agent/mcp/authStorage';
 
 export function activate(context: vscode.ExtensionContext) {
   initConfigStorage(context.globalState);
+  initMcpAuthStorage(context);
+
+  const originalProvider = new AiOriginalContentProvider();
+  const chatProvider = new AiChatViewProvider(context, originalProvider);
 
   const askCommand = vscode.commands.registerCommand('ai-assistant.ask', async () => {
     const editor = vscode.window.activeTextEditor;
     const selectionText = editor?.document.getText(editor.selection).trim();
 
     const question = await vscode.window.showInputBox({
-      prompt: 'Введите запрос для AI ассистента',
+      prompt: 'Введите запрос для ИИ-кодогенератора',
       value: selectionText || '',
       ignoreFocusOut: true
     });
@@ -21,7 +27,8 @@ export function activate(context: vscode.ExtensionContext) {
 
     const cfg = readConfig();
     if (!isConfigValid(cfg)) {
-      vscode.window.showErrorMessage(`${EXTENSION_NAME}: настройте apiBaseUrl, apiKey и model в Settings.`);
+      chatProvider.openSettingsPanel();
+      vscode.window.showErrorMessage(`${EXTENSION_NAME}: настройте apiBaseUrl, apiKey и model в окне «Настройки».`);
       return;
     }
 
@@ -44,7 +51,7 @@ export function activate(context: vscode.ExtensionContext) {
 
       const doc = await vscode.workspace.openTextDocument({
         language: 'markdown',
-        content: `# Ответ AI\n\n**Вопрос:**\n\n${question}\n\n**Ответ:**\n\n${answer}`
+        content: `# Ответ ИИ\n\n**Вопрос:**\n\n${question}\n\n**Ответ:**\n\n${answer}`
       });
       await vscode.window.showTextDocument(doc, { preview: false });
     } catch (error: any) {
@@ -55,35 +62,8 @@ export function activate(context: vscode.ExtensionContext) {
   });
 
   const configureCommand = vscode.commands.registerCommand('ai-assistant.configure', async () => {
-    const cfg = readConfig();
-    const apiBaseUrl = await vscode.window.showInputBox({ prompt: 'Базовый URL API', value: cfg.apiBaseUrl, ignoreFocusOut: true });
-    if (!apiBaseUrl) return;
-    const apiKey = await vscode.window.showInputBox({ prompt: 'API ключ', value: cfg.apiKey, password: true, ignoreFocusOut: true });
-    if (!apiKey) return;
-
-    const loading = vscode.window.setStatusBarMessage(`${EXTENSION_NAME}: загрузка моделей...`);
-    let models: string[] = [];
-    try { models = await fetchModelsList(apiBaseUrl, apiKey); } catch {} finally { loading.dispose(); }
-
-    let model: string | undefined;
-    if (models.length > 0) {
-      const items: vscode.QuickPickItem[] = [{ label: '$(pencil) Ввести вручную', description: 'Если нужной модели нет' }, ...models.map(m => ({ label: m }))];
-      const picked = await vscode.window.showQuickPick(items, { placeHolder: 'Выберите модель', ignoreFocusOut: true });
-      if (!picked) return;
-      model = picked.label === '$(pencil) Ввести вручную'
-        ? await vscode.window.showInputBox({ prompt: 'Имя модели', value: cfg.model, ignoreFocusOut: true })
-        : picked.label;
-    } else {
-      model = await vscode.window.showInputBox({ prompt: 'Имя модели', value: cfg.model, ignoreFocusOut: true });
-    }
-    if (!model) return;
-
-    await saveConfig({ apiBaseUrl, apiKey, model });
-    vscode.window.showInformationMessage(`${EXTENSION_NAME}: настройки обновлены (${model}).`);
+    chatProvider.openSettingsPanel();
   });
-
-  const originalProvider = new AiOriginalContentProvider();
-  const chatProvider = new AiChatViewProvider(context, originalProvider);
 
   const showScmDiff = vscode.commands.registerCommand('ai-assistant.showScmDiff', async (filePath: string) => {
     const folders = vscode.workspace.workspaceFolders;
@@ -92,7 +72,7 @@ export function activate(context: vscode.ExtensionContext) {
     const fileUri = vscode.Uri.joinPath(folders[0].uri, filePath);
     try {
       await vscode.workspace.fs.stat(fileUri);
-      await vscode.commands.executeCommand('vscode.diff', originalUri, fileUri, `${filePath} (AI Changes)`);
+      await vscode.commands.executeCommand('vscode.diff', originalUri, fileUri, `${filePath} (Изменения ИИ)`);
     } catch {
       const doc = await vscode.workspace.openTextDocument(originalUri);
       await vscode.window.showTextDocument(doc, { preview: true });

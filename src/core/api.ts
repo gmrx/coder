@@ -1,7 +1,53 @@
 import * as vscode from 'vscode';
-import { AssistantConfig, ChatMessage } from './types';
+import { AssistantAutoApprovalConfig, AssistantConfig, ChatMessage } from './types';
+import { normalizeMcpDisabledTools, normalizeMcpTrustedTools } from './mcpToolAvailability';
+import { fetchModels, type ChatCompletionOptions, type ModelRequestOptions, type RerankOptions, sendChatCompletion, sendEmbeddings, sendRerank } from './modelClient';
 
 let _state: vscode.Memento | undefined;
+
+const DEFAULT_AUTO_APPROVAL: AssistantAutoApprovalConfig = {
+  fileCreate: true,
+  fileEdit: true,
+  fileDelete: true,
+  webFetch: false,
+  shell: false,
+  worktree: false,
+  mcp: false,
+};
+
+function normalizeHostList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const item of value) {
+    const host = String(item || '')
+      .trim()
+      .toLowerCase()
+      .replace(/^https?:\/\//, '')
+      .replace(/^www\./, '')
+      .replace(/\/.*$/, '')
+      .replace(/:\d+$/, '');
+    if (!host || seen.has(host)) continue;
+    seen.add(host);
+    normalized.push(host);
+  }
+  return normalized;
+}
+
+function normalizeAutoApproval(value: unknown): AssistantAutoApprovalConfig {
+  const source = value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Partial<AssistantAutoApprovalConfig>
+    : {};
+  return {
+    fileCreate: source.fileCreate !== false,
+    fileEdit: source.fileEdit !== false,
+    fileDelete: source.fileDelete !== false,
+    webFetch: source.webFetch === true,
+    shell: source.shell === true,
+    worktree: source.worktree === true,
+    mcp: source.mcp === true,
+  };
+}
 
 export function initConfigStorage(globalState: vscode.Memento) {
   _state = globalState;
@@ -9,12 +55,26 @@ export function initConfigStorage(globalState: vscode.Memento) {
 
 export function readConfig(): AssistantConfig {
   const fallback = vscode.workspace.getConfiguration('aiAssistant');
+  const storedAutoApproval = _state?.get<Partial<AssistantAutoApprovalConfig>>('autoApproval');
+  const configuredAutoApproval = fallback.get<Partial<AssistantAutoApprovalConfig>>('autoApproval');
+  const storedTrustedHosts = _state?.get<unknown>('webTrustedHosts');
+  const storedBlockedHosts = _state?.get<unknown>('webBlockedHosts');
+  const storedDisabledMcpTools = _state?.get<unknown>('mcpDisabledTools');
+  const storedTrustedMcpTools = _state?.get<unknown>('mcpTrustedTools');
   return {
     apiBaseUrl: _state?.get<string>('apiBaseUrl') || fallback.get<string>('apiBaseUrl') || '',
     apiKey: _state?.get<string>('apiKey') || fallback.get<string>('apiKey') || '',
     model: _state?.get<string>('model') || fallback.get<string>('model') || '',
     embeddingsModel: _state?.get<string>('embeddingsModel') || '',
-    rerankModel: _state?.get<string>('rerankModel') || ''
+    rerankModel: _state?.get<string>('rerankModel') || '',
+    systemPrompt: _state?.get<string>('systemPrompt') || fallback.get<string>('systemPrompt') || '',
+    mcpConfigPath: fallback.get<string>('mcpConfigPath') || '',
+    mcpServers: fallback.get<Record<string, unknown>>('mcpServers') || {},
+    mcpDisabledTools: normalizeMcpDisabledTools(fallback.get<unknown>('mcpDisabledTools') || storedDisabledMcpTools || []),
+    mcpTrustedTools: normalizeMcpTrustedTools(fallback.get<unknown>('mcpTrustedTools') || storedTrustedMcpTools || []),
+    webTrustedHosts: normalizeHostList(fallback.get<unknown>('webTrustedHosts') || storedTrustedHosts || []),
+    webBlockedHosts: normalizeHostList(fallback.get<unknown>('webBlockedHosts') || storedBlockedHosts || []),
+    autoApproval: normalizeAutoApproval(configuredAutoApproval || storedAutoApproval || DEFAULT_AUTO_APPROVAL),
   };
 }
 
@@ -25,6 +85,84 @@ export async function saveConfig(data: Partial<AssistantConfig>): Promise<void> 
   if (data.model !== undefined) await _state.update('model', data.model || undefined);
   if (data.embeddingsModel !== undefined) await _state.update('embeddingsModel', data.embeddingsModel || undefined);
   if (data.rerankModel !== undefined) await _state.update('rerankModel', data.rerankModel || undefined);
+  if (data.systemPrompt !== undefined) {
+    const config = vscode.workspace.getConfiguration('aiAssistant');
+    const target = vscode.workspace.workspaceFolders?.length
+      ? vscode.ConfigurationTarget.Workspace
+      : vscode.ConfigurationTarget.Global;
+    const normalizedSystemPrompt = String(data.systemPrompt || '').trim();
+    try {
+      await config.update('systemPrompt', normalizedSystemPrompt || undefined, target);
+      await _state.update('systemPrompt', undefined);
+    } catch {
+      await _state.update('systemPrompt', normalizedSystemPrompt || undefined);
+    }
+  }
+  if (data.autoApproval !== undefined) {
+    const config = vscode.workspace.getConfiguration('aiAssistant');
+    const target = vscode.workspace.workspaceFolders?.length
+      ? vscode.ConfigurationTarget.Workspace
+      : vscode.ConfigurationTarget.Global;
+    const normalizedAutoApproval = normalizeAutoApproval(data.autoApproval);
+    try {
+      await config.update('autoApproval', normalizedAutoApproval, target);
+      await _state.update('autoApproval', undefined);
+    } catch {
+      await _state.update('autoApproval', normalizedAutoApproval);
+    }
+  }
+  if (data.webTrustedHosts !== undefined) {
+    const config = vscode.workspace.getConfiguration('aiAssistant');
+    const target = vscode.workspace.workspaceFolders?.length
+      ? vscode.ConfigurationTarget.Workspace
+      : vscode.ConfigurationTarget.Global;
+    const normalizedTrustedHosts = normalizeHostList(data.webTrustedHosts);
+    try {
+      await config.update('webTrustedHosts', normalizedTrustedHosts, target);
+      await _state.update('webTrustedHosts', undefined);
+    } catch {
+      await _state.update('webTrustedHosts', normalizedTrustedHosts);
+    }
+  }
+  if (data.webBlockedHosts !== undefined) {
+    const config = vscode.workspace.getConfiguration('aiAssistant');
+    const target = vscode.workspace.workspaceFolders?.length
+      ? vscode.ConfigurationTarget.Workspace
+      : vscode.ConfigurationTarget.Global;
+    const normalizedBlockedHosts = normalizeHostList(data.webBlockedHosts);
+    try {
+      await config.update('webBlockedHosts', normalizedBlockedHosts, target);
+      await _state.update('webBlockedHosts', undefined);
+    } catch {
+      await _state.update('webBlockedHosts', normalizedBlockedHosts);
+    }
+  }
+  if (data.mcpDisabledTools !== undefined) {
+    const config = vscode.workspace.getConfiguration('aiAssistant');
+    const target = vscode.workspace.workspaceFolders?.length
+      ? vscode.ConfigurationTarget.Workspace
+      : vscode.ConfigurationTarget.Global;
+    const normalizedDisabledTools = normalizeMcpDisabledTools(data.mcpDisabledTools);
+    try {
+      await config.update('mcpDisabledTools', normalizedDisabledTools, target);
+      await _state.update('mcpDisabledTools', undefined);
+    } catch {
+      await _state.update('mcpDisabledTools', normalizedDisabledTools);
+    }
+  }
+  if (data.mcpTrustedTools !== undefined) {
+    const config = vscode.workspace.getConfiguration('aiAssistant');
+    const target = vscode.workspace.workspaceFolders?.length
+      ? vscode.ConfigurationTarget.Workspace
+      : vscode.ConfigurationTarget.Global;
+    const normalizedTrustedTools = normalizeMcpTrustedTools(data.mcpTrustedTools);
+    try {
+      await config.update('mcpTrustedTools', normalizedTrustedTools, target);
+      await _state.update('mcpTrustedTools', undefined);
+    } catch {
+      await _state.update('mcpTrustedTools', normalizedTrustedTools);
+    }
+  }
 }
 
 export function getApiRootUrl(apiBaseUrl: string): string {
@@ -34,182 +172,32 @@ export function getApiRootUrl(apiBaseUrl: string): string {
   return root.replace(/\/+$/, '');
 }
 
-const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
-const MAX_RETRY_DELAY_MS = 30_000;
-
-function isTransientError(err: any): boolean {
-  if (!err) return false;
-  const msg = String(err.message || err).toLowerCase();
-  if (err.name === 'TypeError' && /fetch|network|failed/i.test(msg)) return true;
-  if (/econnreset|econnrefused|enotfound|etimedout|epipe|socket hang up/i.test(msg)) return true;
-  if (/network|connect|upstream|bad gateway|service unavailable|gateway timeout/i.test(msg)) return true;
-  const statusMatch = msg.match(/\bhttp\s+(\d{3})\b/);
-  if (statusMatch && RETRYABLE_STATUS.has(Number(statusMatch[1]))) return true;
-  return false;
-}
-
-function isUserAbort(err: any, signal?: AbortSignal): boolean {
-  if (signal?.aborted) return true;
-  if (err?.name === 'AbortError') return false;
-  return false;
-}
-
-function retryDelay(attempt: number, status?: number): number {
-  if (status === 429) return Math.min(5_000 * Math.pow(2, attempt - 1), MAX_RETRY_DELAY_MS);
-  return Math.min(1_500 * Math.pow(2, attempt - 1), MAX_RETRY_DELAY_MS);
-}
-
-async function sleepUnlessAborted(ms: number, signal?: AbortSignal): Promise<boolean> {
-  if (signal?.aborted) return false;
-  return new Promise<boolean>((resolve) => {
-    const timer = setTimeout(() => resolve(true), ms);
-    signal?.addEventListener('abort', () => { clearTimeout(timer); resolve(false); }, { once: true });
-  });
-}
-
 export async function fetchModelsList(apiBaseUrl: string, apiKey: string): Promise<string[]> {
-  const maxAttempts = 3;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      const resp = await fetch(getApiRootUrl(apiBaseUrl) + '/v1/models', {
-        headers: { Authorization: `Bearer ${apiKey}` },
-        signal: AbortSignal.timeout(20_000)
-      });
-      if (!resp.ok) {
-        if (RETRYABLE_STATUS.has(resp.status) && attempt < maxAttempts) {
-          await new Promise(r => setTimeout(r, retryDelay(attempt, resp.status)));
-          continue;
-        }
-        return [];
-      }
-      const data: any = await resp.json();
-      const arr = Array.isArray(data) ? data : Array.isArray(data?.data) ? data.data : [];
-      return arr.map((m: any) => m.id || m.name || '').filter((x: string) => typeof x === 'string' && x.length > 0);
-    } catch (err: any) {
-      if (attempt >= maxAttempts || !isTransientError(err)) return [];
-      await new Promise(r => setTimeout(r, retryDelay(attempt)));
-    }
-  }
-  return [];
+  return fetchModels(getApiRootUrl(apiBaseUrl), apiKey);
 }
 
 export async function sendChatRequest(
   apiBaseUrl: string, apiKey: string, model: string, messages: ChatMessage[],
-  opts?: { temperature?: number; maxTokens?: number; signal?: AbortSignal }
+  opts?: ChatCompletionOptions
 ): Promise<string> {
-  const body: Record<string, any> = { model, messages };
-  if (opts?.temperature !== undefined) body.temperature = opts.temperature;
-  if (opts?.maxTokens !== undefined) body.max_tokens = opts.maxTokens;
-
-  const maxAttempts = 5;
-  let lastError: unknown;
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    if (opts?.signal?.aborted) throw new Error('⛔ Задача остановлена пользователем.');
-
-    try {
-      const timeoutSignal = AbortSignal.timeout(180_000);
-      const signal = opts?.signal
-        ? AbortSignal.any([opts.signal, timeoutSignal])
-        : timeoutSignal;
-
-      const response = await fetch(apiBaseUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-        body: JSON.stringify(body),
-        signal
-      });
-
-      if (!response.ok) {
-        const text = await response.text();
-        const err = new Error(`HTTP ${response.status}: ${text.slice(0, 500)}`);
-        if (RETRYABLE_STATUS.has(response.status) && attempt < maxAttempts) {
-          const delay = retryDelay(attempt, response.status);
-          console.warn(`[AI-Assistant] API ${response.status}, retry ${attempt}/${maxAttempts} in ${delay}ms`);
-          const ok = await sleepUnlessAborted(delay, opts?.signal);
-          if (!ok) throw new Error('⛔ Задача остановлена пользователем.');
-          lastError = err;
-          continue;
-        }
-        throw err;
-      }
-
-      const json = (await response.json()) as any;
-      return json.choices?.[0]?.message?.content || json.choices?.[0]?.delta?.content || JSON.stringify(json, null, 2);
-    } catch (err: any) {
-      lastError = err;
-
-      if (isUserAbort(err, opts?.signal)) {
-        throw new Error('⛔ Задача остановлена пользователем.');
-      }
-
-      if (isTransientError(err) && attempt < maxAttempts) {
-        const delay = retryDelay(attempt);
-        console.warn(`[AI-Assistant] Transient error, retry ${attempt}/${maxAttempts} in ${delay}ms: ${err?.message}`);
-        const ok = await sleepUnlessAborted(delay, opts?.signal);
-        if (!ok) throw new Error('⛔ Задача остановлена пользователем.');
-        continue;
-      }
-
-      if (err?.name === 'AbortError' && !opts?.signal?.aborted && attempt < maxAttempts) {
-        const delay = retryDelay(attempt);
-        console.warn(`[AI-Assistant] Timeout, retry ${attempt}/${maxAttempts} in ${delay}ms`);
-        const ok = await sleepUnlessAborted(delay, opts?.signal);
-        if (!ok) throw new Error('⛔ Задача остановлена пользователем.');
-        continue;
-      }
-
-      break;
-    }
-  }
-  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+  return sendChatCompletion(apiBaseUrl, apiKey, model, messages, opts);
 }
 
 export async function sendEmbeddingsRequest(
   apiBaseUrl: string, apiKey: string, model: string, input: string[],
-  signal?: AbortSignal
+  opts?: AbortSignal | ModelRequestOptions
 ): Promise<number[][]> {
-  const maxAttempts = 3;
-  let lastError: unknown;
+  const requestOptions = opts instanceof AbortSignal ? { signal: opts } : opts;
+  return sendEmbeddings(`${getApiRootUrl(apiBaseUrl)}/v1/embeddings`, apiKey, model, input, requestOptions);
+}
 
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    if (signal?.aborted) throw new Error('⛔ Задача остановлена пользователем.');
-
-    try {
-      const fetchSignal = signal
-        ? AbortSignal.any([signal, AbortSignal.timeout(60_000)])
-        : AbortSignal.timeout(60_000);
-
-      const resp = await fetch(getApiRootUrl(apiBaseUrl) + '/v1/embeddings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-        body: JSON.stringify({ model, input }),
-        signal: fetchSignal
-      });
-
-      if (!resp.ok) {
-        const err = new Error(`Embeddings HTTP ${resp.status}`);
-        if (RETRYABLE_STATUS.has(resp.status) && attempt < maxAttempts) {
-          await sleepUnlessAborted(retryDelay(attempt, resp.status), signal);
-          lastError = err;
-          continue;
-        }
-        throw err;
-      }
-
-      const json: any = await resp.json();
-      const data = json?.data || json;
-      if (!Array.isArray(data)) throw new Error('Invalid embeddings response');
-      return data.map((d: any) => d.embedding || d);
-    } catch (err: any) {
-      lastError = err;
-      if (isUserAbort(err, signal)) throw new Error('⛔ Задача остановлена пользователем.');
-      if (isTransientError(err) && attempt < maxAttempts) {
-        await sleepUnlessAborted(retryDelay(attempt), signal);
-        continue;
-      }
-      break;
-    }
-  }
-  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+export async function sendRerankRequest(
+  apiBaseUrl: string,
+  apiKey: string,
+  model: string,
+  query: string,
+  documents: string[],
+  opts?: RerankOptions,
+) {
+  return sendRerank(`${getApiRootUrl(apiBaseUrl)}/v1/rerank`, apiKey, model, query, documents, opts);
 }

@@ -22,18 +22,20 @@ class MermaidManager {
     if (MermaidManager.#initialized) return;
     MermaidManager.#initialized = true;
 
-    if (typeof window.mermaid !== 'undefined') {
-      const cfg = window.MermaidConfig
-        ? window.MermaidConfig.build()
-        : { startOnLoad: false, theme: 'dark', securityLevel: 'loose' };
-      window.mermaid.initialize(cfg);
-    }
+    try {
+      if (typeof window.mermaid !== 'undefined') {
+        MermaidManager.#initializeMermaid();
+      }
 
-    if (window.MermaidOverlay && typeof window.MermaidOverlay.bind === 'function') {
-      window.MermaidOverlay.bind();
-    }
+      if (window.MermaidOverlay && typeof window.MermaidOverlay.bind === 'function') {
+        window.MermaidOverlay.bind();
+      }
 
-    MermaidManager.#renderer = new (window.MermaidRenderer || MermaidRenderer)();
+      MermaidManager.#renderer = new (window.MermaidRenderer || MermaidRenderer)();
+    } catch (error) {
+      console.error('[AI-Assistant] Mermaid init failed:', error);
+      MermaidManager.#renderer = null;
+    }
   }
 
   /**
@@ -44,15 +46,18 @@ class MermaidManager {
    * @returns {Promise<void>}
    */
   static async processContainer(container) {
-    if (!MermaidManager.#renderer) MermaidManager.init();
-    if (!MermaidManager.#renderer || !MermaidManager.#renderer.available) return;
+    try {
+      if (!MermaidManager.#renderer) MermaidManager.init();
+      if (!MermaidManager.#renderer || !MermaidManager.#renderer.available) return;
 
-    // Re-initialize before each render batch to ensure themeCSS is applied
-    if (typeof window.mermaid !== 'undefined' && window.MermaidConfig) {
-      window.mermaid.initialize(window.MermaidConfig.build());
+      if (typeof window.mermaid !== 'undefined' && window.MermaidConfig) {
+        MermaidManager.#initializeMermaid();
+      }
+
+      await MermaidManager.#renderer.renderAllIn(container);
+    } catch (error) {
+      console.error('[AI-Assistant] Mermaid render failed:', error);
     }
-
-    await MermaidManager.#renderer.renderAllIn(container);
   }
 
   /**
@@ -60,6 +65,29 @@ class MermaidManager {
    */
   static destroyAll() {
     if (MermaidManager.#renderer) MermaidManager.#renderer.destroyAll();
+  }
+
+  static #initializeMermaid() {
+    try {
+      var cfg = window.MermaidConfig
+        ? window.MermaidConfig.build()
+        : MermaidManager.#fallbackConfig();
+      window.mermaid.initialize(cfg);
+    } catch (error) {
+      console.error('[AI-Assistant] Mermaid custom config failed, using fallback config:', error);
+      window.mermaid.initialize(MermaidManager.#fallbackConfig());
+    }
+  }
+
+  static #fallbackConfig() {
+    return {
+      startOnLoad: false,
+      securityLevel: 'strict',
+      theme: 'default',
+      htmlLabels: false,
+      logLevel: 'error',
+      suppressErrorRendering: true,
+    };
   }
 }
 
