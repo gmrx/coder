@@ -32,7 +32,7 @@ export async function executeAgentToolStep(
 ): Promise<ToolExecutionResult> {
   const stepKey = options.stepKey ?? state.iteration;
   const pushAssistantResponse = options.pushAssistant !== false;
-  const callKey = `${action.tool}:${JSON.stringify(action.args || {})}`;
+  const callKey = session.buildToolCallKey(action.tool, action.args || {});
   session.usedCalls.add(callKey);
   session.modelUsedTools.add(action.tool);
   state.consecutiveDupes = 0;
@@ -163,7 +163,7 @@ function syncBatchChildHistory(
   if (!children?.length) return;
 
   for (const child of children) {
-    const callKey = `${child.toolName}:${JSON.stringify(child.args || {})}`;
+    const callKey = session.buildToolCallKey(child.toolName, child.args || {});
     session.usedCalls.add(callKey);
     session.modelUsedTools.add(child.toolName);
     session.recordToolCallResult(

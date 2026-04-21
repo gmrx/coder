@@ -1,14 +1,14 @@
-import type { ExecuteToolFn, ToolExecutionContext, ToolHandler } from './types';
+import type { ExecuteToolResultFn, ToolExecutionContext, ToolHandler } from './types';
 import { runSubagentSingle } from './subagentCore';
 import { buildVerificationAgentTaskPrompt } from './verificationPromptContracts';
 
-export function createVerificationAgentHandler(executeTool: ExecuteToolFn): ToolHandler {
+export function createVerificationAgentHandler(executeTool: ExecuteToolResultFn): ToolHandler {
   return async (args, context) => runVerificationAgent(args || {}, executeTool, context);
 }
 
 async function runVerificationAgent(
   args: any,
-  executeTool: ExecuteToolFn,
+  executeTool: ExecuteToolResultFn,
   context: ToolExecutionContext,
 ): Promise<string> {
   const task = pickString(args?.task, args?.original_task, context.query);

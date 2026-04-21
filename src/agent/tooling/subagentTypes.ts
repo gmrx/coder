@@ -1,4 +1,4 @@
-import type { ExecuteToolFn, ToolExecutionContext } from './types';
+import type { ExecuteToolResultFn, ToolExecutionContext } from './types';
 
 export type SubagentLifecycleState = 'planned' | 'queued' | 'running' | 'done' | 'error' | 'summarized';
 
@@ -30,7 +30,7 @@ export interface WorkspaceFileCatalogCache {
 }
 
 export interface SubagentExecutionDependencies {
-  executeTool: ExecuteToolFn;
+  executeTool: ExecuteToolResultFn;
   context: ToolExecutionContext;
   guidedReadCache: Map<string, Promise<string>>;
   workspaceFileCache: WorkspaceFileCatalogCache;

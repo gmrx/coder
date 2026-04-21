@@ -15,7 +15,7 @@ import { executeToolBatch } from './tooling/toolBatch';
 import type { ToolEventCallback, ToolRuntimeHints } from './tooling/types';
 import type { AgentToolSearchRecommendation } from './runtime/types';
 
-const handlers = createToolHandlers(executeTool);
+const handlers = createToolHandlers(executeTool, executeToolResult);
 
 export async function executeTool(
   toolName: string,

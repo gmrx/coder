@@ -181,7 +181,7 @@ async function runAutoContextTool(
   try {
     const result = await executeToolResult(toolName, args, session.lastQuestion, session.trace.event, session.signal);
     session.pushUser(`[Авто-контекст: ${toolName}]:\n${truncate(result.content)}`);
-    session.usedCalls.add(`${toolName}:${JSON.stringify(args)}`);
+    session.usedCalls.add(session.buildToolCallKey(toolName, args));
     updateMemory(session.memory, toolName, args, result);
     session.modelUsedTools.add(toolName);
     session.trace.autoDone(toolName, args, result.content, result.status);

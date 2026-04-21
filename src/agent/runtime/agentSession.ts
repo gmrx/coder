@@ -10,6 +10,13 @@ import {
 } from '../runnerMemory';
 import { cleanupFinalAnswer } from '../runnerOutput';
 import {
+  buildMcpRemoteStateKey,
+  buildMcpScopedCallKey,
+  getMcpArgumentsArg,
+  getMcpServerArg,
+  getMcpToolNameArg,
+} from '../mcp/executionPolicy';
+import {
   buildRetryMessage,
   FINAL_ANSWER_TEMPERATURE,
 } from './loopPolicy';
@@ -60,6 +67,7 @@ export class AgentSession {
     lastContent: string;
     recommendation?: AgentToolSearchRecommendation | null;
   }>();
+  private readonly remoteStateVersions = new Map<string, number>();
   private lastToolSearchRecommendation: AgentToolSearchRecommendation | null = null;
 
   private constructor(
@@ -413,6 +421,23 @@ export class AgentSession {
     return this.callHistory.get(callKey);
   }
 
+  buildToolCallKey(toolName: string, args: any): string {
+    if (toolName === 'mcp_tool') {
+      const server = getMcpServerArg(args);
+      const name = getMcpToolNameArg(args);
+      if (server && name) {
+        const stateKey = buildMcpRemoteStateKey(server);
+        return buildMcpScopedCallKey(
+          server,
+          name,
+          getMcpArgumentsArg(args),
+          this.remoteStateVersions.get(stateKey) || 0,
+        );
+      }
+    }
+    return `${toolName}:${JSON.stringify(args || {})}`;
+  }
+
   getToolSearchRecommendation(): AgentToolSearchRecommendation | null {
     return this.lastToolSearchRecommendation;
   }
@@ -434,6 +459,7 @@ export class AgentSession {
       lastContent: execution.content,
       ...(recommendation !== undefined ? { recommendation } : {}),
     });
+    this.updateRemoteStateVersion(execution);
 
     if (execution.toolName === 'tool_search') {
       if (execution.status === 'success') {
@@ -451,5 +477,12 @@ export class AgentSession {
     ) {
       this.lastToolSearchRecommendation = null;
     }
+  }
+
+  private updateRemoteStateVersion(execution: ToolExecutionResult): void {
+    const hint = execution.meta?.remoteStateHint;
+    if (!hint || hint.system !== 'mcp' || !hint.changed) return;
+    if (execution.status !== 'success' && execution.status !== 'degraded') return;
+    this.remoteStateVersions.set(hint.key, (this.remoteStateVersions.get(hint.key) || 0) + 1);
   }
 }

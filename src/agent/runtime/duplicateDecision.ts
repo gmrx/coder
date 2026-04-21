@@ -11,7 +11,7 @@ export function evaluateDuplicateDecision(
   state: TurnLoopState,
   action: AgentAction,
 ): TurnContinuationDecision | null {
-  const callKey = `${action.tool}:${JSON.stringify(action.args || {})}`;
+  const callKey = session.buildToolCallKey(action.tool, action.args || {});
   const previous = session.getToolCallRecord(callKey);
   if (!previous) return null;
   if (canRetrySameToolCall(previous.toolName, previous.status, previous.attempts)) {

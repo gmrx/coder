@@ -1,4 +1,4 @@
-import type { ExecuteToolFn, ToolHandlerMap } from './types';
+import type { ExecuteToolFn, ExecuteToolResultFn, ToolHandlerMap } from './types';
 import { createSubagentHandler } from './subagent';
 import { createVerificationAgentHandler } from './verificationAgent';
 import { catalogToolHandlers } from './handlers/catalogTools';
@@ -10,7 +10,10 @@ import { projectToolHandlers } from './handlers/projectTools';
 import { taskToolHandlers } from './handlers/taskTools';
 import { worktreeToolHandlers } from './handlers/worktreeTools';
 
-export function createToolHandlers(executeTool: ExecuteToolFn): ToolHandlerMap {
+export function createToolHandlers(
+  executeTool: ExecuteToolFn,
+  executeToolResult: ExecuteToolResultFn,
+): ToolHandlerMap {
   return {
     ...catalogToolHandlers,
     ...projectToolHandlers,
@@ -20,7 +23,7 @@ export function createToolHandlers(executeTool: ExecuteToolFn): ToolHandlerMap {
     ...mcpToolHandlers,
     ...taskToolHandlers,
     ...worktreeToolHandlers,
-    subagent: createSubagentHandler(executeTool),
-    verification_agent: createVerificationAgentHandler(executeTool),
+    subagent: createSubagentHandler(executeToolResult),
+    verification_agent: createVerificationAgentHandler(executeToolResult),
   };
 }

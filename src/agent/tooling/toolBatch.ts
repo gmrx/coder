@@ -22,6 +22,13 @@ import {
 } from './results';
 import type { ExecuteToolResultFn, ToolEventCallback, ToolRuntimeHints } from './types';
 import type { AgentToolSearchRecommendation } from '../runtime/types';
+import { listMcpTools } from '../mcp/client';
+import {
+  classifyMcpToolExecutionPolicy,
+  getMcpArgumentsArg,
+  getMcpServerArg,
+  getMcpToolNameArg,
+} from '../mcp/executionPolicy';
 
 type ToolBatchContext = {
   query?: string;
@@ -161,7 +168,7 @@ async function validateBatchCall(
     );
   }
 
-  const batchRestriction = getBatchRestrictionReason(toolName);
+  const batchRestriction = await getBatchRestrictionReason(toolName, resolved.args || {});
   if (batchRestriction) {
     return createToolExecutionResult(
       'tool_batch',
@@ -196,9 +203,12 @@ async function validateBatchCall(
   return null;
 }
 
-function getBatchRestrictionReason(toolName: string): string | null {
+async function getBatchRestrictionReason(toolName: string, args: any): Promise<string | null> {
   if (toolName === 'final_answer') {
     return '"final_answer" нельзя вызывать внутри tool_batch';
+  }
+  if (toolName === 'mcp_tool') {
+    return getMcpBatchRestrictionReason(args);
   }
   if (!isToolReadOnly(toolName)) {
     return `утилита "${toolName}" не подходит: она не read-only`;
@@ -215,6 +225,45 @@ function getBatchRestrictionReason(toolName: string): string | null {
   if (getToolDefinition(toolName)?.virtual) {
     return `утилита "${toolName}" является служебной и не подходит для tool_batch`;
   }
+  return null;
+}
+
+async function getMcpBatchRestrictionReason(args: any): Promise<string | null> {
+  const server = getMcpServerArg(args);
+  const name = getMcpToolNameArg(args);
+  const toolArgs = getMcpArgumentsArg(args);
+  if (!server || !name) {
+    return '"mcp_tool" внутри tool_batch требует server + name';
+  }
+
+  let descriptor:
+    | Awaited<ReturnType<typeof listMcpTools>>['tools'][number]
+    | undefined;
+  try {
+    const tools = await listMcpTools(server);
+    descriptor = tools.tools.find((tool) => tool.server === server && tool.name === name);
+  } catch {
+    descriptor = undefined;
+  }
+
+  if (!descriptor) {
+    return `сначала получи schema для ${server}::${name} через list_mcp_tools, потом решай batching`;
+  }
+
+  const policy = classifyMcpToolExecutionPolicy(server, name, descriptor);
+  if (policy.requiresApproval) {
+    return `MCP tool "${server}::${name}" не read-only и должен вызываться отдельным шагом`;
+  }
+  if (!policy.concurrencySafe) {
+    return `MCP tool "${server}::${name}" не помечен как concurrency-safe`;
+  }
+
+  try {
+    JSON.stringify(toolArgs || {});
+  } catch {
+    return `аргументы MCP tool "${server}::${name}" не сериализуются`;
+  }
+
   return null;
 }
 

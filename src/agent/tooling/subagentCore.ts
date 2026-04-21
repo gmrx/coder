@@ -4,6 +4,13 @@ import { truncate } from '../../core/utils';
 import { getSubagentAllowedTools, validateSubagentArgs } from './catalog';
 import { isMcpFocusedSubagentTask, narrowAllowedToolsForMcpFocus } from './subagentMcpFocus';
 import {
+  buildMcpRemoteStateKey,
+  buildMcpScopedCallKey,
+  getMcpArgumentsArg,
+  getMcpServerArg,
+  getMcpToolNameArg,
+} from '../mcp/executionPolicy';
+import {
   buildSubagentDisallowedToolPrompt,
   buildSubagentDuplicatePrompt,
   buildSubagentFinalMarkdownPrompt,
@@ -19,7 +26,8 @@ import {
   buildSubagentStepPresentation,
   buildSubagentToolPresentation,
 } from './subagentEventPresentation';
-import type { ExecuteToolFn, ToolEventCallback, ToolExecutionContext } from './types';
+import { createToolExecutionResult, type ToolExecutionResult } from './results';
+import type { ExecuteToolResultFn, ToolEventCallback, ToolExecutionContext } from './types';
 
 let subagentSequence = 0;
 
@@ -78,7 +86,37 @@ export async function sendChatWithStepRetry(
   });
 }
 
-export async function runSubagentSingle(args: any, executeTool: ExecuteToolFn, context: ToolExecutionContext): Promise<string> {
+function buildSubagentCallKey(
+  action: { tool: string; args?: any },
+  remoteStateVersions: Map<string, number>,
+): string {
+  if (action.tool === 'mcp_tool') {
+    const server = getMcpServerArg(action.args || {});
+    const name = getMcpToolNameArg(action.args || {});
+    if (server && name) {
+      const stateKey = buildMcpRemoteStateKey(server);
+      return buildMcpScopedCallKey(
+        server,
+        name,
+        getMcpArgumentsArg(action.args || {}),
+        remoteStateVersions.get(stateKey) || 0,
+      );
+    }
+  }
+  return `${action.tool}:${JSON.stringify(action.args || {})}`;
+}
+
+function updateSubagentRemoteState(
+  execution: ToolExecutionResult,
+  remoteStateVersions: Map<string, number>,
+): void {
+  const hint = execution.meta?.remoteStateHint;
+  if (!hint || hint.system !== 'mcp' || !hint.changed) return;
+  if (execution.status !== 'success' && execution.status !== 'degraded') return;
+  remoteStateVersions.set(hint.key, (remoteStateVersions.get(hint.key) || 0) + 1);
+}
+
+export async function runSubagentSingle(args: any, executeTool: ExecuteToolResultFn, context: ToolExecutionContext): Promise<string> {
   const task = (args?.prompt || args?.task || args?.query || '').toString().trim();
   if (!task) return '(subagent) укажи "prompt" (или "task").';
 
@@ -119,7 +157,7 @@ export async function runSubagentSingle(args: any, executeTool: ExecuteToolFn, c
         `Задача: ${task}\n` +
         (context.query ? `Контекст родительского запроса: ${context.query}\n` : '') +
         (mcpFocused
-          ? 'Это задача про MCP/внешнюю систему. Не уходи в read_file/find_relevant_files/semantic_search по workspace, если только задача явно не просит разбирать локальный MCP config. Сначала работай через list_mcp_tools, затем через mcp_tool.\n'
+          ? 'Это задача про MCP/внешнюю систему. Не уходи в read_file/find_relevant_files/semantic_search по workspace, если только задача явно не просит разбирать локальный MCP config. Сначала работай через list_mcp_tools, затем через mcp_tool. Если в задаче уже перечислены GUID проектов и нужный MCP tool, не делай лишние подготовительные вызовы вроде whoami/list_projects без необходимости.\n'
           : '') +
         'Сначала получи факты инструментами, затем дай final_answer.',
     },
@@ -129,7 +167,8 @@ export async function runSubagentSingle(args: any, executeTool: ExecuteToolFn, c
   let noActionCount = 0;
   let disallowedCount = 0;
   let consecutiveDuplicates = 0;
-  const usedCalls = new Set<string>();
+  let lastCallKey: string | null = null;
+  const remoteStateVersions = new Map<string, number>();
 
   while (true) {
     step++;
@@ -251,8 +290,8 @@ export async function runSubagentSingle(args: any, executeTool: ExecuteToolFn, c
       continue;
     }
 
-    const callKey = `${action.tool}:${JSON.stringify(action.args || {})}`;
-    if (usedCalls.has(callKey)) {
+    const callKey = buildSubagentCallKey(action, remoteStateVersions);
+    if (lastCallKey === callKey) {
       consecutiveDuplicates++;
       if (consecutiveDuplicates >= 3) {
         context.onEvent?.('subagent-error', ` [Subagent ${id}] Зацикливание на одинаковых вызовах`, {
@@ -270,8 +309,8 @@ export async function runSubagentSingle(args: any, executeTool: ExecuteToolFn, c
       continue;
     }
 
-    usedCalls.add(callKey);
     consecutiveDuplicates = 0;
+    lastCallKey = callKey;
     context.onEvent?.('subagent-tool', ` [Subagent ${id}] ${action.tool}`, {
       ...buildSubagentToolPresentation({
         tool: action.tool,
@@ -284,12 +323,18 @@ export async function runSubagentSingle(args: any, executeTool: ExecuteToolFn, c
       reasoning: action.reasoning || '',
     });
 
-    let toolResult: string;
+    let execution: ToolExecutionResult;
     try {
-      toolResult = await executeTool(action.tool, action.args || {}, task, context.onEvent, context.signal);
+      execution = await executeTool(action.tool, action.args || {}, task, context.onEvent, context.signal);
     } catch (error: any) {
-      toolResult = `Ошибка инструмента ${action.tool}: ${error?.message || error}`;
+      execution = createToolExecutionResult(
+        action.tool,
+        'error',
+        `Ошибка инструмента ${action.tool}: ${error?.message || error}`,
+      );
     }
+    const toolResult = execution.content;
+    updateSubagentRemoteState(execution, remoteStateVersions);
 
     context.onEvent?.('subagent-result', ` [Subagent ${id}] ${action.tool} → ${toolResult.split('\n').length} строк`, {
       ...buildSubagentResultPresentation({

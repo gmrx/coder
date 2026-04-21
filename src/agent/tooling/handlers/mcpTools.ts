@@ -12,6 +12,12 @@ import {
   listMcpTools,
   readMcpResource,
 } from '../../mcp/client';
+import {
+  classifyMcpToolExecutionPolicy,
+  getMcpArgumentsArg,
+  getMcpServerArg,
+  getMcpToolNameArg,
+} from '../../mcp/executionPolicy';
 import { readConfig } from '../../../core/api';
 import { filterDisabledMcpTools, isMcpToolDisabled } from '../../../core/mcpToolAvailability';
 import { buildToolApprovalRequest } from '../catalog';
@@ -515,11 +521,9 @@ export const mcpToolHandlers: ToolHandlerMap = {
   },
 
   async mcp_tool(args, context) {
-    const server = String(args?.server || '').trim();
-    const name = String(args?.name || args?.toolName || args?.tool || '').trim();
-    const rawToolArgs = args?.arguments && typeof args.arguments === 'object' && !Array.isArray(args.arguments)
-      ? args.arguments as Record<string, unknown>
-      : {};
+    const server = getMcpServerArg(args);
+    const name = getMcpToolNameArg(args);
+    const rawToolArgs = getMcpArgumentsArg(args);
     let descriptor: Awaited<ReturnType<typeof findMcpToolDescriptor>> | undefined;
     let toolArgs: Record<string, unknown> = rawToolArgs;
     let previewPrefix = '';
@@ -561,19 +565,18 @@ export const mcpToolHandlers: ToolHandlerMap = {
           return buildMcpValidationResult(server, name, toolArgs, descriptor, previewPrefix, schemaIssues);
         }
       }
-      const readOnlyHint = descriptor?.annotations?.readOnlyHint === true;
-      const destructiveHint = descriptor?.annotations?.destructiveHint === true;
+      const policy = classifyMcpToolExecutionPolicy(server, name, descriptor);
       const argsJson = JSON.stringify(toolArgs, null, 2);
       let autoApproved = false;
 
-      if (!readOnlyHint) {
+      if (policy.requiresApproval) {
         const approval = await confirmMcpToolCall(
           {
             server,
             mcpToolName: name,
             argsJson,
-            readOnlyHint,
-            destructiveHint,
+            readOnlyHint: policy.readOnly,
+            destructiveHint: policy.destructive,
             summary: descriptor?.description || `Вызов MCP tool ${server} • ${name}`,
           },
           context.onEvent,
@@ -653,6 +656,13 @@ export const mcpToolHandlers: ToolHandlerMap = {
         }),
         {
           autoApproved,
+          remoteStateHint: {
+            system: 'mcp',
+            key: policy.stateKey,
+            changed: policy.changesState && !result.isError,
+            readOnly: policy.readOnly,
+            concurrencySafe: policy.concurrencySafe,
+          },
           presentation: {
             kind: 'mcp_tool_call',
             data: buildMcpToolCallPresentation(result, {

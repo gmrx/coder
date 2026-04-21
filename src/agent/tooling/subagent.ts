@@ -1,14 +1,14 @@
-import type { ExecuteToolFn, ToolExecutionContext, ToolHandler } from './types';
+import type { ExecuteToolResultFn, ToolExecutionContext, ToolHandler } from './types';
 import { runSubagentSingle } from './subagentCore';
 import { executeSubagentBatch } from './subagentExecutor';
 import { createSubagentBatchPlan } from './subagentTaskNormalizer';
 import { buildSubagentBatchResult } from './subagentSummarizer';
 
-export function createSubagentHandler(executeTool: ExecuteToolFn): ToolHandler {
+export function createSubagentHandler(executeTool: ExecuteToolResultFn): ToolHandler {
   return async (args, context) => runSubagent(args || {}, executeTool, context);
 }
 
-async function runSubagent(args: any, executeTool: ExecuteToolFn, context: ToolExecutionContext): Promise<string> {
+async function runSubagent(args: any, executeTool: ExecuteToolResultFn, context: ToolExecutionContext): Promise<string> {
   const rawTasks = Array.isArray(args?.tasks) ? args.tasks : [];
   if (rawTasks.length === 0) {
     return runSubagentSingle(args, executeTool, context);

@@ -3,6 +3,7 @@ export interface ToolInputValidationContext {
 }
 
 import { validateAskUserQuestions } from '../questionStudy';
+import { getMcpToolNameArg } from '../../mcp/executionPolicy';
 
 export type ToolInputValidator = (
   args: any,
@@ -196,7 +197,7 @@ export const TOOL_INPUT_VALIDATORS: Partial<Record<string, ToolInputValidator>> 
   },
   mcp_tool(args) {
     if (!hasText(args?.server)) return 'Для "mcp_tool" обязателен args.server';
-    if (!hasText(args?.name) && !hasText(args?.toolName)) return 'Для "mcp_tool" обязателен args.name';
+    if (!hasText(getMcpToolNameArg(args))) return 'Для "mcp_tool" обязателен args.name';
     if (args?.arguments !== undefined && (!args.arguments || typeof args.arguments !== 'object' || Array.isArray(args.arguments))) {
       return 'Для "mcp_tool" args.arguments должен быть объектом';
     }

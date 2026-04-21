@@ -32,6 +32,14 @@ export interface ToolExecutionRecoveryHint {
   nextStep?: string;
 }
 
+export interface ToolExecutionRemoteStateHint {
+  system: 'mcp';
+  key: string;
+  changed: boolean;
+  readOnly?: boolean;
+  concurrencySafe?: boolean;
+}
+
 export type ToolExecutionPresentationData =
   | {
     kind: 'ask_user';
@@ -132,6 +140,7 @@ export interface ToolExecutionMetaBase {
   followupPrompt?: string;
   presentation?: ToolExecutionPresentationData;
   autoApproved?: boolean;
+  remoteStateHint?: ToolExecutionRemoteStateHint;
 }
 
 export interface ToolBatchChildResult {

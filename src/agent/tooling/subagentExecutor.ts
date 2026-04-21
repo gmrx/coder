@@ -127,8 +127,10 @@ async function executeNormalizedTask(
   const explicitTargets = task.files && task.files.length > 0
     ? await expandTaskTargets(task.files, task.prompt, deps.workspaceFileCache)
     : [];
+  const executeToolAsString = async (...args: Parameters<typeof deps.executeTool>): Promise<string> =>
+    (await deps.executeTool(...args)).content;
   const inferredFiles = !task.mcpFocused && explicitTargets.length === 0 && task.prompt
-    ? await inferFilesForPrompt(task.prompt, deps.executeTool, deps.context, deps.workspaceFileCache)
+    ? await inferFilesForPrompt(task.prompt, executeToolAsString, deps.context, deps.workspaceFileCache)
     : [];
   const guidedFiles = explicitTargets.length > 0 ? explicitTargets : inferredFiles;
 
@@ -220,7 +222,8 @@ async function executeDirectTask(
     state: 'running',
   });
 
-  const result = await deps.executeTool(task.action!, task.actionArgs || {}, deps.context.query, deps.context.onEvent, deps.context.signal);
+  const execution = await deps.executeTool(task.action!, task.actionArgs || {}, deps.context.query, deps.context.onEvent, deps.context.signal);
+  const result = execution.content;
   deps.context.onEvent?.('subagent-result', ` [Subagent ${task.label}] ${task.action} → ${result.split('\n').length} строк`, {
     ...buildSubagentResultPresentation({
       tool: task.action,
@@ -296,7 +299,8 @@ async function executeGuidedTask(
 
     let readPromise = deps.guidedReadCache.get(filePath);
     if (!readPromise) {
-      readPromise = deps.executeTool('read_file', { path: filePath }, deps.context.query, deps.context.onEvent, deps.context.signal);
+      readPromise = deps.executeTool('read_file', { path: filePath }, deps.context.query, deps.context.onEvent, deps.context.signal)
+        .then((execution) => execution.content);
       deps.guidedReadCache.set(filePath, readPromise);
     }
 

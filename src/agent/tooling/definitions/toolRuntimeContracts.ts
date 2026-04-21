@@ -47,7 +47,7 @@ export const TOOL_RUNTIME_CONTRACTS: Partial<Record<string, ToolRuntimeContract>
   },
   mcp_tool: {
     validateInput: true,
-    repeatPolicy: { allowSameArgsRetryAfter: ['error', 'degraded'], maxAttemptsPerCall: 2 },
+    repeatPolicy: { allowSameArgsRetryAfter: ['error', 'degraded', 'blocked'], maxAttemptsPerCall: 2 },
   },
   mcp_auth: {
     validateInput: true,
