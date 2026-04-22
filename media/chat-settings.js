@@ -25,6 +25,17 @@
     var cancelBtn = $('#cancelBtn');
     var saveStatus = $('#saveStatus');
 
+    var sJiraBaseUrl = $('#s_jiraBaseUrl');
+    var sJiraUsername = $('#s_jiraUsername');
+    var sJiraPassword = $('#s_jiraPassword');
+    var toggleJiraPasswordBtn = $('#toggleJiraPasswordBtn');
+    var jiraCheckBtn = $('#jiraCheckBtn');
+    var jiraStatusCard = $('#jiraStatusCard');
+    var jiraStatusDot = $('#jiraStatusDot');
+    var jiraStatusText = $('#jiraStatusText');
+    var jiraStatusMeta = $('#jiraStatusMeta');
+    var jiraProjectList = $('#jiraProjectList');
+
     var sMcpConfigPath = $('#s_mcpConfigPath');
     var mcpServerList = $('#mcpServerList');
     var mcpStatusCard = $('#mcpStatusCard');
@@ -178,7 +189,10 @@
         model: pickerValues.chat,
         rerankModel: pickerValues.rerank,
         embeddingsModel: pickerValues.emb,
-        systemPrompt: sSystemPrompt ? String(sSystemPrompt.value || '').trim() : ''
+        systemPrompt: sSystemPrompt ? String(sSystemPrompt.value || '').trim() : '',
+        jiraBaseUrl: sJiraBaseUrl ? sJiraBaseUrl.value.trim() : '',
+        jiraUsername: sJiraUsername ? sJiraUsername.value.trim() : '',
+        jiraPassword: sJiraPassword ? sJiraPassword.value.trim() : ''
       };
     }
 
@@ -948,6 +962,79 @@
       setSaveStatus(message || 'Есть несохранённые web-fetch изменения.', tone || 'idle');
     }
 
+    function setJiraStatus(state, text, meta) {
+      if (!jiraStatusCard || !jiraStatusDot || !jiraStatusText || !jiraStatusMeta) return;
+      jiraStatusDot.className = 'conn-dot ' + state;
+      jiraStatusText.textContent = text || '';
+      jiraStatusMeta.textContent = meta || '';
+      jiraStatusCard.className = 'settings-status-card is-compact' + (state === 'ok' ? ' is-ok' : state === 'err' ? ' is-err' : '');
+    }
+
+    function renderJiraProjects(projects) {
+      if (!jiraProjectList) return;
+      var rows = Array.isArray(projects)
+        ? projects.filter(function (project) {
+            var tasks = Array.isArray(project.tasks) ? project.tasks : [];
+            return tasks.length || (Number(project.taskCount) || 0) > 0;
+          })
+        : [];
+      if (!rows.length) {
+        jiraProjectList.innerHTML = '';
+        return;
+      }
+      jiraProjectList.innerHTML = rows.map(function (project) {
+        var title = String(project.key || '') + (project.name ? ' • ' + String(project.name) : '');
+        var count = Number(project.taskCount) || 0;
+        var tasks = Array.isArray(project.tasks) ? project.tasks : [];
+        var taskRows = tasks.map(function (task) {
+          var taskTitle = String(task.key || '') + (task.title ? ' • ' + String(task.title) : '');
+          var description = String(task.description || '').trim();
+          return '' +
+            '<div class="jira-task-row" title="' + escapeHtml(task.url || '') + '">' +
+              '<div class="jira-task-title">' + escapeHtml(taskTitle) + '</div>' +
+              '<div class="jira-task-description' + (description ? '' : ' is-empty') + '">' +
+                escapeHtml(description || 'Описание не заполнено.') +
+              '</div>' +
+              '<div class="jira-task-url">' + escapeHtml(task.url || '') + '</div>' +
+            '</div>';
+        }).join('');
+        var taskList = taskRows
+          ? '<div class="jira-task-list">' + taskRows + '</div>'
+          : '<div class="jira-task-empty">Задачи в проекте не загружены.</div>';
+        return '' +
+          '<div class="jira-project-row" title="' + escapeHtml(project.url || '') + '">' +
+            '<div class="jira-project-head">' +
+              '<div>' +
+                '<div class="jira-project-title">' + escapeHtml(title) + '</div>' +
+                '<div class="jira-project-meta">' + escapeHtml(project.url || '') + '</div>' +
+              '</div>' +
+              '<div class="jira-project-count">' + escapeHtml(String(count)) + '</div>' +
+            '</div>' +
+            taskList +
+          '</div>';
+      }).join('');
+    }
+
+    function handleJiraCheckResult(msg) {
+      if (jiraCheckBtn) {
+        jiraCheckBtn.disabled = false;
+        jiraCheckBtn.textContent = 'Проверить Jira';
+      }
+      if (!msg || !msg.ok) {
+        setJiraStatus('err', 'Jira не прошла проверку', (msg && msg.error) || 'Ошибка подключения или авторизации.');
+        renderJiraProjects([]);
+        setSaveStatus('Jira не прошла проверку.', 'error');
+        return;
+      }
+      setJiraStatus(
+        'ok',
+        'Авторизация Jira успешна: ' + (msg.authUser || 'пользователь определён'),
+        'Проектов: ' + String(msg.projectsCount || 0) + ' • задач пользователя: ' + String(msg.totalTasks || 0) + (msg.warning ? ' • ' + msg.warning : '')
+      );
+      renderJiraProjects(msg.projects || []);
+      setSaveStatus('Jira проверена.', 'ok');
+    }
+
     function collectSettingsPayload(options) {
       var payload = buildBasePayload();
       payload.mcpDisabledTools = mcpState.disabledTools.slice();
@@ -973,6 +1060,9 @@
       sApiBaseUrl.value = data.apiBaseUrl || '';
       sApiKey.value = data.apiKey || '';
       if (sSystemPrompt) sSystemPrompt.value = data.systemPrompt || '';
+      if (sJiraBaseUrl) sJiraBaseUrl.value = data.jiraBaseUrl || '';
+      if (sJiraUsername) sJiraUsername.value = data.jiraUsername || '';
+      if (sJiraPassword) sJiraPassword.value = data.jiraPassword || '';
       if (sMcpConfigPath) sMcpConfigPath.value = data.mcpConfigPath || '';
       modelsList = Array.isArray(data.models) ? data.models : [];
       pickerValues.chat = data.model || '';
@@ -1020,7 +1110,7 @@
         pChat.setWarning(issue ? issue.message : '');
         setConnStatus('ok', statusText);
         setModelTestsVisible(false);
-        showToast('Загружено моделей: ' + modelsList.length);
+        if (!msg.silent) showToast('Загружено моделей: ' + modelsList.length);
         return;
       }
       setConnStatus('err', statusText);
@@ -1257,6 +1347,33 @@
         toggleKeyBtn.innerHTML = hidden ? '&#128274;' : '&#128065;';
       });
 
+      if (toggleJiraPasswordBtn && sJiraPassword) {
+        toggleJiraPasswordBtn.addEventListener('click', function () {
+          var hidden = sJiraPassword.type === 'password';
+          sJiraPassword.type = hidden ? 'text' : 'password';
+          toggleJiraPasswordBtn.innerHTML = hidden ? '&#128274;' : '&#128065;';
+        });
+      }
+
+      [sJiraBaseUrl, sJiraUsername, sJiraPassword].forEach(function (input) {
+        if (!input) return;
+        input.addEventListener('input', function () {
+          setSaveStatus('Есть несохранённые Jira-настройки.', 'idle');
+          setJiraStatus('idle', 'Jira ещё не проверялась.', 'Проверка покажет пользователя, количество проектов и задачи пользователя с названием и описанием.');
+          renderJiraProjects([]);
+        });
+      });
+
+      if (jiraCheckBtn) {
+        jiraCheckBtn.addEventListener('click', function () {
+          jiraCheckBtn.disabled = true;
+          jiraCheckBtn.textContent = 'Проверяю...';
+          setJiraStatus('loading', 'Проверяю авторизацию Jira...', 'Загружаю задачи пользователя, названия и описания.');
+          renderJiraProjects([]);
+          vscode.postMessage({ type: 'checkJira', data: buildBasePayload() });
+        });
+      }
+
       testConnBtn.addEventListener('click', function () {
         vscode.postMessage({ type: 'testConnection', data: buildBasePayload() });
         setConnStatus('loading', 'Проверяю подключение...');
@@ -1415,6 +1532,7 @@
         renderMcpInspectionState();
         setSaveStatus(msg.summary || 'Проверка MCP завершена.', msg.ok ? 'ok' : 'error');
       },
+      handleJiraCheckResult: handleJiraCheckResult,
       handleSettingsSaved: function (msg) {
         saveBtn.disabled = false;
         saveBtn.textContent = 'Сохранить';

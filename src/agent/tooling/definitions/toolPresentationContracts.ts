@@ -419,6 +419,24 @@ const TOOL_PRESENTATION_CONTRACTS: Partial<Record<string, ToolPresentationContra
       return 'Подготовил обзор URL';
     },
   },
+  jira_list_projects: {
+    startSummary: 'Читаю проекты Jira',
+    buildResultSummary(execution) {
+      return execution.status === 'error' ? 'Не удалось прочитать проекты Jira' : 'Получил проекты Jira';
+    },
+  },
+  jira_search_tasks: {
+    startSummary: 'Ищу задачи Jira',
+    buildResultSummary(execution) {
+      return execution.status === 'error' ? 'Не удалось прочитать задачи Jira' : 'Получил задачи Jira';
+    },
+  },
+  jira_get_task: {
+    startSummary: 'Читаю задачу Jira',
+    buildResultSummary(execution) {
+      return execution.status === 'error' ? 'Не удалось прочитать задачу Jira' : 'Получил задачу Jira';
+    },
+  },
 };
 
 export function getToolStartSummary(toolName: string): string {

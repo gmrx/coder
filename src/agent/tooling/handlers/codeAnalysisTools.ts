@@ -2,6 +2,9 @@ import * as vscode from 'vscode';
 import { buildDependencyGraph, extractDocumentSymbols } from '../../../analysis/symbols';
 import {
   CODE_EXTENSIONS_RE,
+  IGNORE_PATTERN,
+  MAX_FILE_SIZE,
+  SEARCHABLE_EXTENSIONS_BARE,
 } from '../../../core/constants';
 import type { ToolHandlerMap } from '../types';
 import { collectDiagnosticsResult } from '../diagnostics';
@@ -33,7 +36,11 @@ import {
   normalizeDependencyOutputMode,
 } from '../symbolStudy';
 import { createToolExecutionResult } from '../results';
-import { isUriInAgentWorkspace, toAgentRelativePath } from '../../worktreeSession';
+import { createAgentRelativePattern, isUriInAgentWorkspace, toAgentRelativePath } from '../../worktreeSession';
+import type { RankedFileMatch } from '../retrievalTypes';
+
+const LEXICAL_RELEVANT_FILES_MAX_SCAN = 1_200;
+const LEXICAL_RELEVANT_FILES_MAX_READ = 500;
 
 export const codeAnalysisToolHandlers: ToolHandlerMap = {
   async extract_symbols(args) {
@@ -465,6 +472,31 @@ export const codeAnalysisToolHandlers: ToolHandlerMap = {
       const top = rerankedFiles.matches;
 
       if (!top.length || top[0].score < 0.08) {
+        const fallback = await findLexicalRelevantFiles(query, { limit: pageWindow, targetDirectory, signal: context.signal });
+        if (fallback.length) {
+          const options = {
+            outputMode,
+            limit,
+            offset,
+            reranked: false,
+            targetDirectory,
+          };
+          return createToolExecutionResult(
+            'find_relevant_files',
+            'success',
+            [
+              'Semantic shortlist не дал уверенных совпадений; использован лексический fallback по workspace.',
+              '',
+              formatRelevantFilesOutput(query, fallback, options),
+            ].join('\n'),
+            {
+              presentation: {
+                kind: 'find_relevant_files',
+                data: buildRelevantFilesPresentation(query, fallback, options),
+              },
+            },
+          );
+        }
         const content = `Не удалось выделить релевантные файлы для "${query}".`;
         return createToolExecutionResult('find_relevant_files', 'success', content, {
           presentation: {
@@ -500,6 +532,31 @@ export const codeAnalysisToolHandlers: ToolHandlerMap = {
       );
     } catch (error: any) {
       const message = error?.message || String(error);
+      const fallback = await findLexicalRelevantFiles(query, { limit: offset + limit, targetDirectory, signal: context.signal });
+      if (fallback.length) {
+        const options = {
+          outputMode,
+          limit,
+          offset,
+          reranked: false,
+          targetDirectory,
+        };
+        return createToolExecutionResult(
+          'find_relevant_files',
+          'success',
+          [
+            `Semantic shortlist недоступен (${message}); использован лексический fallback по workspace.`,
+            '',
+            formatRelevantFilesOutput(query, fallback, options),
+          ].join('\n'),
+          {
+            presentation: {
+              kind: 'find_relevant_files',
+              data: buildRelevantFilesPresentation(query, fallback, options),
+            },
+          },
+        );
+      }
       return createToolExecutionResult('find_relevant_files', 'error', message, {
         presentation: {
           kind: 'find_relevant_files',
@@ -520,3 +577,119 @@ export const codeAnalysisToolHandlers: ToolHandlerMap = {
     }
   },
 };
+
+async function findLexicalRelevantFiles(
+  query: string,
+  options: { limit: number; targetDirectory?: string; signal?: AbortSignal },
+): Promise<RankedFileMatch[]> {
+  const terms = buildLexicalSearchTerms(query);
+  if (!terms.length || options.signal?.aborted) return [];
+
+  const target = normalizeTargetDirectory(options.targetDirectory);
+  const glob = target
+    ? `${target}/**/${SEARCHABLE_EXTENSIONS_BARE}`
+    : `**/${SEARCHABLE_EXTENSIONS_BARE}`;
+  const uris = await vscode.workspace.findFiles(
+    createAgentRelativePattern(glob),
+    IGNORE_PATTERN,
+    LEXICAL_RELEVANT_FILES_MAX_SCAN,
+  );
+
+  const matches: RankedFileMatch[] = [];
+  let readCount = 0;
+  for (const uri of uris) {
+    if (options.signal?.aborted) break;
+    if (!isUriInAgentWorkspace(uri)) continue;
+    const relativePath = toAgentRelativePath(uri);
+    const pathScore = scorePathByTerms(relativePath, terms);
+    let text = '';
+    try {
+      const stat = await vscode.workspace.fs.stat(uri);
+      if (stat.size > MAX_FILE_SIZE) continue;
+      if (readCount >= LEXICAL_RELEVANT_FILES_MAX_READ && pathScore <= 0) continue;
+      text = await readWorkspaceText(uri);
+      readCount += 1;
+    } catch {
+      continue;
+    }
+
+    const snippets = buildLexicalSnippets(relativePath, text, terms);
+    const contentScore = snippets.reduce((sum, snippet) => sum + snippet.score, 0);
+    const rawScore = pathScore + contentScore;
+    if (rawScore <= 0) continue;
+    const score = Math.min(0.99, rawScore / (24 + terms.length * 5));
+    matches.push({
+      path: relativePath,
+      score,
+      topChunkScore: snippets[0]?.score || score,
+      snippets: snippets.length
+        ? snippets
+        : [{
+          path: relativePath,
+          startLine: 1,
+          text: '',
+          score,
+        }],
+    });
+  }
+
+  return matches
+    .sort((left, right) => right.score - left.score || left.path.localeCompare(right.path))
+    .slice(0, Math.max(1, Math.min(options.limit, 24)));
+}
+
+function buildLexicalSearchTerms(query: string): string[] {
+  const stopWords = new Set([
+    'как', 'что', 'это', 'для', 'или', 'при', 'над', 'под', 'про', 'изучи', 'лучше',
+    'текущую', 'текущая', 'задачу', 'задача', 'реализовать', 'реализация',
+    'the', 'and', 'for', 'with', 'from', 'this', 'that', 'task', 'current',
+  ]);
+  const seen = new Set<string>();
+  const terms: string[] = [];
+  for (const match of String(query || '').toLowerCase().match(/[a-zа-я0-9_/-]{3,}/gi) || []) {
+    const term = match.replace(/^[-_/]+|[-_/]+$/g, '');
+    if (!term || term.length < 3 || stopWords.has(term) || seen.has(term)) continue;
+    seen.add(term);
+    terms.push(term);
+  }
+  return terms.slice(0, 18);
+}
+
+function normalizeTargetDirectory(value: string | undefined): string {
+  return String(value || '')
+    .trim()
+    .replace(/^\.?\//, '')
+    .replace(/\\/g, '/')
+    .replace(/^\/+|\/+$/g, '');
+}
+
+function scorePathByTerms(filePath: string, terms: string[]): number {
+  const normalized = filePath.toLowerCase();
+  const basename = normalized.split('/').pop() || normalized;
+  let score = 0;
+  for (const term of terms) {
+    if (basename.includes(term)) score += 18;
+    else if (normalized.includes(term)) score += 10;
+  }
+  return score;
+}
+
+function buildLexicalSnippets(filePath: string, text: string, terms: string[]) {
+  const lines = String(text || '').split(/\r?\n/);
+  const snippets: Array<{ path: string; text: string; startLine: number; score: number }> = [];
+  for (let index = 0; index < lines.length; index++) {
+    const lower = lines[index].toLowerCase();
+    const hits = terms.filter((term) => lower.includes(term));
+    if (!hits.length) continue;
+    const start = Math.max(0, index - 1);
+    const end = Math.min(lines.length, index + 2);
+    snippets.push({
+      path: filePath,
+      startLine: start + 1,
+      text: lines.slice(start, end).join('\n').slice(0, 1_200),
+      score: Math.min(0.95, 0.12 + hits.length * 0.16),
+    });
+    if (snippets.length >= 4) break;
+  }
+  return snippets.sort((left, right) => right.score - left.score);
+}

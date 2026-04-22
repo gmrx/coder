@@ -40,6 +40,7 @@ import type {
   AgentToolSearchRecommendation,
 } from './types';
 import type { AgentWorktreeSession } from '../worktreeSession';
+import { compactTextWithBoundary, selectHistoryMessagesWithSummary } from './contextPacking';
 
 export type AgentSessionInitResult =
   | { ok: true; session: AgentSession }
@@ -51,6 +52,7 @@ export class AgentSession {
   readonly modelUsedTools = new Set<string>();
   readonly memory: AgentMemory;
   readonly lastQuestion: string;
+  readonly toolContextQuery: string;
   readonly mutationQuery: boolean;
   readonly needMermaid: boolean;
   readonly retrievalAutoContext: boolean;
@@ -80,6 +82,7 @@ export class AgentSession {
   ) {
     this.messages = messages;
     this.lastQuestion = prepared.lastQuestion;
+    this.toolContextQuery = prepared.toolContextQuery || prepared.lastQuestion;
     this.runtime = runtime;
     this.control = control;
     this.embeddingsModel = runtime.config.embeddingsModel;
@@ -294,6 +297,8 @@ export class AgentSession {
           (this.freshMcpRequired
             ? 'Если вопрос связан с MCP или внешней системой, источник истины — только свежие MCP результаты текущего запуска. Накопленный контекст прошлых запросов используй только как подсказку маршрута.\n'
             : '') +
+          'Если ответ касается реализации в текущей кодовой базе, не называй компоненты отсутствующими и не предлагай создать модуль/инструмент с нуля без подтверждения из прочитанных файлов текущего запуска.\n' +
+          'Если похожая реализация уже найдена, формулируй ответ как доработку существующих файлов, а не как новый проект.\n' +
           'Не превращай ответ в общий обзор проекта, если пользователь этого прямо не просил.\n' +
           'Если в старом диалоге есть другая тема, игнорируй её.\n' +
           'Не выводи JSON. Пиши по-русски.',
@@ -301,12 +306,12 @@ export class AgentSession {
       {
         role: 'user',
         content:
-          `[Последний запрос пользователя]\n${truncate(this.lastQuestion, 1_500, '…')}\n\n` +
+          `[Последний запрос пользователя]\n${compactTextWithBoundary(this.lastQuestion, 1_500, 'последний запрос пользователя')}\n\n` +
           (this.freshMcpRequired
             ? '[Правило свежести]\nЭто вопрос про внешние данные через MCP. Не отвечай только по памяти прошлых запросов. Опирайся на свежие MCP результаты ТЕКУЩЕГО запуска.\n\n'
             : '') +
           (this.carryoverContext
-            ? `[Накопленный контекст прошлых запросов]\n${truncate(this.carryoverContext, 14_000, '…')}\n\n`
+            ? `[Накопленный контекст прошлых запросов]\n${compactTextWithBoundary(this.carryoverContext, 14_000, 'накопленный контекст прошлых запросов')}\n\n`
             : '') +
           (sessionTranscript
             ? `[История текущей сессии и результаты инструментов]\n${sessionTranscript}\n\n`
@@ -378,21 +383,12 @@ export class AgentSession {
     });
     if (messages.length === 0) return '';
 
-    const selected: ChatMessage[] = [];
-    let total = 0;
-    for (let index = messages.length - 1; index >= 0; index--) {
-      const message = messages[index];
-      const normalized = String(message.content || '');
-      const size = normalized.length;
-      if (selected.length > 0 && total + size > MAX_TOTAL_CHARS) break;
-      selected.unshift(message);
-      total += size;
-    }
+    const selected = selectHistoryMessagesWithSummary(messages, MAX_TOTAL_CHARS);
 
     return selected
       .map((message) => {
         const role = message.role === 'assistant' ? 'Агент' : 'Пользователь';
-        return `${role}: ${truncate(String(message.content || ''), MAX_MESSAGE_CHARS, '…')}`;
+        return `${role}: ${compactTextWithBoundary(String(message.content || ''), MAX_MESSAGE_CHARS, `сообщение ${role} в финальной истории`)}`;
       })
       .join('\n\n');
   }

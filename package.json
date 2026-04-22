@@ -2,7 +2,7 @@
   "name": "coder",
   "displayName": "ИИ Кодогенератор",
   "description": "ИИ-кодогенератор для VS Code с агентным циклом и поддержкой любого LLM API.",
-  "version": "0.0.227",
+  "version": "0.0.271",
   "author": "Мартин Газов (gmrx)",
   "publisher": "gmrx",
   "license": "SEE LICENSE IN LICENSE",
@@ -119,23 +119,38 @@
         },
         "aiAssistant.model": {
           "type": "string",
-          "default": "gpt-4.1-mini",
+          "default": "Qwen3.5-35B-A3B-FP8",
           "description": "Имя модели (например, gpt-4.1, gpt-4.1-mini или другая)."
         },
         "aiAssistant.embeddingsModel": {
           "type": "string",
-          "default": "",
+          "default": "Qwen3-Embedding-0.6B",
           "description": "Имя модели эмбеддингов (для анализа проекта и поиска по коду). Оставьте пустым, если не используете."
         },
         "aiAssistant.rerankModel": {
           "type": "string",
-          "default": "",
+          "default": "bge-reranker-v2-m3",
           "description": "Имя модели rerank (для переупорядочивания файлов/фрагментов под запрос). Оставьте пустым, если не используете."
         },
         "aiAssistant.systemPrompt": {
           "type": "string",
           "default": "",
           "markdownDescription": "Дополнительные постоянные инструкции для агента. Этот текст подмешивается в системный prompt и задаёт стиль работы, ограничения и предпочтения."
+        },
+        "aiAssistant.jiraBaseUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Базовый URL Jira-сервиса."
+        },
+        "aiAssistant.jiraUsername": {
+          "type": "string",
+          "default": "",
+          "description": "Логин для чтения проектов и задач из Jira."
+        },
+        "aiAssistant.jiraPassword": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Пароль или персональный токен для Jira. **Не коммитьте его в git!**"
         },
         "aiAssistant.mcpConfigPath": {
           "type": "string",

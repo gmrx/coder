@@ -97,6 +97,9 @@
       case 'mcpInspectionResult':
         settings.handleMcpInspectionResult(msg);
         return;
+      case 'jiraCheckResult':
+        settings.handleJiraCheckResult(msg);
+        return;
       case 'settingsSaved':
         settings.handleSettingsSaved(msg);
         return;

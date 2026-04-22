@@ -1,4 +1,3 @@
-import { truncate } from '../../core/utils';
 import { executeToolResult } from '../executor';
 import type { AgentAction } from '../prompt';
 import { updateMemory } from '../runnerMemory';
@@ -17,6 +16,7 @@ import { createTurnTransition } from './transitions';
 import { emitAgentTransition } from './transitionDispatcher';
 import type { AgentApprovalRequest } from './approvals';
 import type { AgentQuestionRequest } from './questions';
+import { compactToolResultForContext } from './contextPacking';
 
 type ExecuteToolStepOptions = {
   pushAssistant?: boolean;
@@ -59,7 +59,7 @@ export async function executeAgentToolStep(
     clearAgentRecovery(state.recovery);
     session.trace.result(stepKey, action.tool, execution);
     if (pushAssistantResponse) session.pushAssistant(response);
-    session.pushUser(`[Результат ${action.tool}]:\n${truncate(execution.content)}`);
+    session.pushUser(`[Результат ${action.tool}]:\n${compactToolResultForContext(action.tool, execution.content)}`);
     emitAgentTransition(
       session,
       state,
@@ -87,7 +87,7 @@ export async function executeAgentToolStep(
 
   updateExecutionMemory(session, action, execution);
   if (pushAssistantResponse) session.pushAssistant(response);
-  session.pushUser(`[Результат ${action.tool}]:\n${truncate(execution.content)}`);
+  session.pushUser(`[Результат ${action.tool}]:\n${compactToolResultForContext(action.tool, execution.content)}`);
   applyPostToolOutcome(session, state, action.tool, action.args || {}, execution);
   return execution;
 }
@@ -140,7 +140,7 @@ async function runTool(
     return await executeToolResult(
       action.tool,
       action.args || {},
-      session.lastQuestion,
+      session.toolContextQuery,
       onEvent,
       session.signal,
       session.getToolSearchRecommendation(),

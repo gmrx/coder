@@ -1,3 +1,5 @@
+export { computeLineChangeStats, type LineChangeStats } from '../core/lineDiff';
+
 export interface DiffLine {
   type: 'context' | 'add' | 'del' | 'sep' | 'hunk';
   text: string;

@@ -8,10 +8,18 @@ import { updateMemory } from '../runnerMemory';
 import { isMcpFreshnessSensitiveQuery, isMutationIntentQuery } from './memory';
 import type { AgentSession } from './agentSession';
 import type { AgentTurnPreparationInput, PreparedAgentTurn } from './types';
+import {
+  compactTextWithBoundary,
+  compactToolResultForContext,
+  packExternalContextForPrompt,
+  selectHistoryMessagesWithSummary,
+  serializeMessagesWithCompaction,
+} from './contextPacking';
 
 const INITIAL_HISTORY_BUDGET_CHARS = 42_000;
 const CARRYOVER_CONTEXT_BUDGET_CHARS = 18_000;
 const CARRYOVER_PER_MESSAGE_CHARS = 1_800;
+const EXTERNAL_CONTEXT_BUDGET_CHARS = 20_000;
 
 export function prepareAgentTurnInput(input: AgentTurnPreparationInput, embeddingsModel: string): PreparedAgentTurn {
   const lastQuestion = input.chatHistory[input.chatHistory.length - 1]?.content || input.question;
@@ -19,16 +27,19 @@ export function prepareAgentTurnInput(input: AgentTurnPreparationInput, embeddin
   const retrievalAutoContext = shouldPrimeRetrievalByWorkflow(lastQuestion, embeddingsModel);
   const carryoverContext = buildCarryoverContext(input.chatHistory, input.sessionMemory || null);
   const freshMcpRequired = isMcpFreshnessSensitiveQuery(lastQuestion, carryoverContext);
+  const autoRetrievalQuery = buildAutoRetrievalQuery(lastQuestion, input.externalContext || '');
 
   return {
     lastQuestion,
-    messages: buildInitialMessages(input.chatHistory, input.activeFile, input.sessionMemory || null, input.systemPrompt || ''),
+    messages: buildInitialMessages(input.chatHistory, input.activeFile, input.sessionMemory || null, input.systemPrompt || '', input.externalContext || ''),
     carryoverContext,
     freshMcpRequired,
     isFirstMessage: input.chatHistory.length <= 1,
     mutationQuery,
     needMermaid: requiresMermaidDiagram(lastQuestion),
     retrievalAutoContext,
+    autoRetrievalQuery,
+    toolContextQuery: autoRetrievalQuery,
   };
 }
 
@@ -71,7 +82,7 @@ export async function primePreparedTurn(
 
   if (prepared.retrievalAutoContext) {
     await runAutoContextTool(session, 'find_relevant_files', {
-      query: prepared.lastQuestion,
+      query: prepared.autoRetrievalQuery,
       limit: 8,
     });
   }
@@ -84,6 +95,7 @@ function buildInitialMessages(
   activeFile: AgentTurnPreparationInput['activeFile'],
   sessionMemory: AgentTurnPreparationInput['sessionMemory'],
   systemPrompt: string,
+  externalContext: string,
 ): ChatMessage[] {
   const messages: ChatMessage[] = [{ role: 'system', content: buildSystemPrompt(chatHistory, systemPrompt) }];
   messages.push(...buildFewShotMessages());
@@ -93,18 +105,76 @@ function buildInitialMessages(
     messages.push(memoryMessage);
   }
 
-  for (const msg of selectHistoryMessages(chatHistory.slice(0, -1), INITIAL_HISTORY_BUDGET_CHARS)) {
+  for (const msg of selectHistoryMessagesWithSummary(chatHistory.slice(0, -1), INITIAL_HISTORY_BUDGET_CHARS)) {
     messages.push(msg);
+  }
+
+  const context = String(externalContext || '').trim();
+  if (context) {
+    messages.push({
+      role: 'user',
+      content: `[Контекст текущей сессии]\n${packExternalContextForPrompt(context, EXTERNAL_CONTEXT_BUDGET_CHARS)}`,
+    });
   }
 
   if (activeFile) {
     messages.push({
       role: 'user',
-      content: `[Контекст] Открыт файл: ${activeFile.path} (${activeFile.language})\n\`\`\`\n${truncate(activeFile.content, 3000)}\n\`\`\``,
+      content: `[Контекст] Открыт файл: ${activeFile.path} (${activeFile.language})\n\`\`\`\n${compactTextWithBoundary(activeFile.content, 3000, `открытый файл ${activeFile.path}`)}\n\`\`\``,
     });
   }
 
   return messages;
+}
+
+function buildAutoRetrievalQuery(question: string, externalContext: string): string {
+  const taskHints = extractJiraTaskRetrievalHints(externalContext);
+  if (!taskHints) return question;
+  return [
+    question,
+    '',
+    'Контекст Jira-задачи для поиска по текущей кодовой базе:',
+    taskHints,
+  ].join('\n').trim();
+}
+
+function extractJiraTaskRetrievalHints(externalContext: string): string {
+  const context = String(externalContext || '');
+  if (!/Контекст Jira-задачи/i.test(context)) return '';
+  const lines = context.split(/\r?\n/);
+  const selected: string[] = [];
+  let includeDescription = false;
+  let descriptionLines = 0;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      includeDescription = false;
+      continue;
+    }
+    if (/^(Контекст Jira-задачи|Проект:|Задача:|Статус:|Тип:|Приоритет:|Labels:|Components:|Fix versions:)/i.test(trimmed)) {
+      selected.push(trimmed);
+      continue;
+    }
+    if (/^Описание:$/i.test(trimmed)) {
+      selected.push(trimmed);
+      includeDescription = true;
+      descriptionLines = 0;
+      continue;
+    }
+    if (includeDescription && descriptionLines < 4) {
+      selected.push(trimmed);
+      descriptionLines += 1;
+      continue;
+    }
+    if (
+      /^Комментарии Jira/i.test(trimmed) ||
+      (/^- .{0,160}$/i.test(trimmed) && /jira|авторизац|интеграц|api|проект|задач|чат/i.test(trimmed))
+    ) {
+      selected.push(trimmed);
+    }
+    if (selected.join('\n').length >= 1_400) break;
+  }
+  return compactTextWithBoundary(selected.join('\n'), 1_500, 'Jira-подсказки для поиска по коду');
 }
 
 function buildSessionMemoryMessage(
@@ -129,30 +199,12 @@ function buildSessionMemoryMessage(
   };
 }
 
-function selectHistoryMessages(history: ChatMessage[], maxChars: number): ChatMessage[] {
-  if (!Array.isArray(history) || history.length === 0) return [];
-  const selected: ChatMessage[] = [];
-  let total = 0;
-  for (let index = history.length - 1; index >= 0; index--) {
-    const message = history[index];
-    const size = String(message?.content || '').length;
-    if (selected.length > 0 && total + size > maxChars) break;
-    selected.unshift(message);
-    total += size;
-  }
-  return selected;
-}
-
 function serializeConversationMessages(
   messages: ChatMessage[],
   maxChars: number,
   perMessageLimit: number,
 ): string {
-  const selected = selectHistoryMessages(messages, maxChars);
-  if (selected.length === 0) return '';
-  return selected
-    .map((msg) => `${msg.role === 'user' ? 'Пользователь' : 'Агент'}: ${truncate(String(msg.content || ''), perMessageLimit, '…')}`)
-    .join('\n\n');
+  return serializeMessagesWithCompaction(messages, maxChars, perMessageLimit);
 }
 
 function buildUserRequestEnvelope(
@@ -179,8 +231,8 @@ async function runAutoContextTool(
   session.trace.autoStart(toolName, args);
 
   try {
-    const result = await executeToolResult(toolName, args, session.lastQuestion, session.trace.event, session.signal);
-    session.pushUser(`[Авто-контекст: ${toolName}]:\n${truncate(result.content)}`);
+    const result = await executeToolResult(toolName, args, session.toolContextQuery, session.trace.event, session.signal);
+    session.pushUser(`[Авто-контекст: ${toolName}]:\n${compactToolResultForContext(toolName, result.content)}`);
     session.usedCalls.add(session.buildToolCallKey(toolName, args));
     updateMemory(session.memory, toolName, args, result);
     session.modelUsedTools.add(toolName);

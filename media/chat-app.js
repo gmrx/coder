@@ -35,6 +35,7 @@
   var chatRuntimeActivityEl = $('#chatRuntimeActivity');
   var chatRuntimeNarrativeEl = $('#chatRuntimeNarrative');
   var chatUtilityBarEl = $('#chatUtilityBar');
+  var chatSessionMetricsEl = $('#chatSessionMetrics');
   var toggleSessionMemoryBtn = $('#toggleSessionMemoryBtn');
   var toggleTaskPanelBtn = $('#toggleTaskPanelBtn');
   var chatSessionMemoryEl = $('#chatSessionMemory');
@@ -44,6 +45,16 @@
   var openSessionMemoryBtn = $('#openSessionMemoryBtn');
   var hideSessionMemoryBtn = $('#hideSessionMemoryBtn');
   var chatSessionsListEl = $('#chatSessionsList');
+  var jiraProjectSelectEl = $('#jiraProjectSelect');
+  var refreshJiraProjectsBtn = $('#refreshJiraProjectsBtn');
+  var jiraChatScopeStatusEl = $('#jiraChatScopeStatus');
+  var jiraContextPanelEl = $('#jiraContextPanel');
+  var toggleJiraContextBtn = $('#toggleJiraContextBtn');
+  var jiraContextTitleEl = $('#jiraContextTitle');
+  var jiraContextMetaEl = $('#jiraContextMeta');
+  var jiraContextLinkEl = $('#jiraContextLink');
+  var jiraContextDescriptionEl = $('#jiraContextDescription');
+  var jiraContextCommitsEl = $('#jiraContextCommits');
   var todoPanelEl = $('#todoPanel');
   var todoMetaEl = $('#todoMeta');
   var todoListEl = $('#todoList');
@@ -83,6 +94,11 @@
   var taskPanelTotalCount = 0;
   var taskPanelSummary = '';
   var bulkFilesOpen = !!persistedUiState.bulkFilesOpen;
+  var jiraContextPanelOpen = false;
+  var currentJiraContextKey = '';
+  var jiraContextOpenSections = persistedUiState.jiraContextOpenSections && typeof persistedUiState.jiraContextOpenSections === 'object'
+    ? persistedUiState.jiraContextOpenSections
+    : {};
   var AUTO_APPROVAL_PRESETS = {
     manual: {
       fileCreate: false,
@@ -192,7 +208,23 @@
       if (!currentTurn) return null;
       var runCount = currentTurn.flowEl.querySelectorAll('.trace-run').length;
       var stepCount = currentTurn.flowEl.querySelectorAll('.trace-step').length;
-      var fileChangeCount = currentTurn.el.querySelectorAll('.message.file-change').length;
+      var traceRuns = currentTurn.flowEl.querySelectorAll('.trace-run');
+      var fileChangeCards = currentTurn.el.querySelectorAll('.message.file-change');
+      var fileChangeCount = fileChangeCards.length;
+      var addedLines = 0;
+      var removedLines = 0;
+      var agentUserEdited = 0;
+      var userOnlyEdited = 0;
+      var toolErrors = 0;
+      Array.prototype.forEach.call(fileChangeCards, function (card) {
+        addedLines += Number(card.dataset.added || 0) || 0;
+        removedLines += Number(card.dataset.removed || 0) || 0;
+      });
+      Array.prototype.forEach.call(traceRuns, function (run) {
+        agentUserEdited += Number(run.dataset.agentUserEdited || 0) || 0;
+        userOnlyEdited += Number(run.dataset.userOnlyEdited || 0) || 0;
+        toolErrors += Number(run.dataset.toolErrors || 0) || 0;
+      });
       var approvalCount = currentTurn.el.querySelectorAll('.approval-request').length;
       return {
         id: currentTurn.id,
@@ -200,6 +232,11 @@
         runCount: runCount,
         stepCount: stepCount,
         fileChangeCount: fileChangeCount,
+        addedLines: addedLines,
+        removedLines: removedLines,
+        agentUserEdited: agentUserEdited,
+        userOnlyEdited: userOnlyEdited,
+        toolErrors: toolErrors,
         approvalCount: approvalCount
       };
     }
@@ -209,7 +246,13 @@
       if (!info || (!info.hasRun && info.fileChangeCount <= 0 && info.approvalCount <= 0)) return '';
       var parts = [];
       if (info.stepCount > 0) parts.push(formatThreadCount(info.stepCount, 'шаг', 'шага', 'шагов'));
-      if (info.fileChangeCount > 0) parts.push(formatThreadCount(info.fileChangeCount, 'изменение файла', 'изменения файла', 'изменений файла'));
+      if (info.fileChangeCount > 0) {
+        parts.push(formatThreadCount(info.fileChangeCount, 'изменение файла', 'изменения файла', 'изменений файла'));
+        parts.push('+' + info.addedLines + ' / -' + info.removedLines);
+      }
+      if (info.agentUserEdited > 0) parts.push('пользователь изменил строки агента: ' + info.agentUserEdited);
+      if (info.userOnlyEdited > 0) parts.push('своих правок пользователя: ' + info.userOnlyEdited);
+      if (info.toolErrors > 0) parts.push('ошибок утилит: ' + info.toolErrors);
       if (info.approvalCount > 0) parts.push(formatThreadCount(info.approvalCount, 'согласование', 'согласования', 'согласований'));
       if (parts.length === 0 && info.hasRun) parts.push('выполнение связано с этим ответом');
       return parts.join(' • ');
@@ -425,7 +468,8 @@
         chatsCollapsed: chatsCollapsed,
         sessionMemoryOpen: sessionMemoryOpen,
         taskPanelOpen: taskPanelOpen,
-        bulkFilesOpen: bulkFilesOpen
+        bulkFilesOpen: bulkFilesOpen,
+        jiraContextOpenSections: jiraContextOpenSections
       });
     } catch (_) {}
   }
@@ -679,6 +723,20 @@
     };
   }
 
+  function createMetricsFallback() {
+    return {
+      resetFromSnapshot: function () {},
+      recordUserRequest: function () {},
+      recordAssistantResponse: function () {},
+      recordAgentRunStarted: function () {},
+      recordTraceEvent: function () {},
+      recordFileChange: function () {},
+      recordChangeMetrics: function () {},
+      recordCheckpointReverted: function () {},
+      recordUndoRevert: function () {}
+    };
+  }
+
   function safeCreateController(factory, fallback, label) {
     try {
       return factory();
@@ -737,6 +795,9 @@
           titleEl: chatSessionTitleEl,
           metaEl: chatSessionMetaEl,
           listEl: chatSessionsListEl,
+          jiraProjectSelectEl: jiraProjectSelectEl,
+          jiraRefreshBtn: refreshJiraProjectsBtn,
+          jiraStatusEl: jiraChatScopeStatusEl,
           newBtn: newChatBtn,
           quickNewBtn: quickNewChatBtn,
           clearBtn: clearChatBtn
@@ -766,6 +827,14 @@
         })
       : createTasksFallback();
   }, createTasksFallback, 'tasks controller');
+
+  var metrics = safeCreateController(function () {
+    return window.ChatSessionMetrics && window.ChatSessionMetrics.createMetricsController
+      ? window.ChatSessionMetrics.createMetricsController({
+          rootEl: chatSessionMetricsEl
+        })
+      : createMetricsFallback();
+  }, createMetricsFallback, 'metrics controller');
 
   function syncAssistPanels() {
     var showPlan = runtimeTodos.length > 0 && (runtimeProgressState === 'running' || runtimeProgressState === 'waiting');
@@ -880,6 +949,182 @@
     renderUtilityPanels();
   }
 
+  function updateJiraContext(context) {
+    if (!jiraContextPanelEl) return;
+    var visible = !!(context && context.issueKey);
+    var issueKey = visible ? String(context.issueKey || '') : '';
+    if (issueKey !== currentJiraContextKey) {
+      currentJiraContextKey = issueKey;
+      jiraContextPanelOpen = false;
+    }
+    updateJiraContextToggle(visible);
+    jiraContextPanelEl.classList.toggle('hidden', !visible || !jiraContextPanelOpen);
+    if (!visible) {
+      jiraContextPanelOpen = false;
+      if (jiraContextTitleEl) jiraContextTitleEl.textContent = '';
+      if (jiraContextMetaEl) jiraContextMetaEl.textContent = '';
+      if (jiraContextDescriptionEl) jiraContextDescriptionEl.textContent = '';
+      if (jiraContextCommitsEl) jiraContextCommitsEl.innerHTML = '';
+      if (jiraContextLinkEl) jiraContextLinkEl.classList.add('hidden');
+      return;
+    }
+
+    var title = context.issueKey + (context.title ? ' • ' + context.title : '');
+    if (jiraContextTitleEl) {
+      jiraContextTitleEl.textContent = title;
+      jiraContextTitleEl.title = title;
+    }
+
+    var meta = [];
+    if (context.project) meta.push(context.project);
+    if (context.status) meta.push('Статус: ' + context.status);
+    if (context.loading) meta.push('обновляю контекст');
+    else if (context.updatedAt) meta.push('обновлено ' + formatRelativeTime(context.updatedAt));
+    if (Array.isArray(context.meta)) {
+      context.meta.slice(0, 4).forEach(function (item) {
+        if (item) meta.push(String(item));
+      });
+    }
+    if (jiraContextMetaEl) {
+      jiraContextMetaEl.textContent = meta.join(' • ');
+      jiraContextMetaEl.title = meta.join('\n');
+    }
+
+    if (jiraContextLinkEl) {
+      if (context.url) {
+        jiraContextLinkEl.href = context.url;
+        jiraContextLinkEl.classList.remove('hidden');
+      } else {
+        jiraContextLinkEl.classList.add('hidden');
+      }
+    }
+
+    if (jiraContextDescriptionEl) {
+      var description = context.description || (context.error ? 'Контекст задачи пока не загрузился: ' + context.error : 'Описание задачи не заполнено.');
+      jiraContextDescriptionEl.textContent = description;
+      jiraContextDescriptionEl.title = description;
+    }
+
+    if (!jiraContextCommitsEl) return;
+    jiraContextCommitsEl.innerHTML = '';
+    var sections = Array.isArray(context.sections) ? context.sections : [];
+    sections.forEach(function (section) {
+      if (!section || !Array.isArray(section.items) || !section.items.length) return;
+      var sectionEl = createJiraContextSection(context, section.title || 'Блок', countJiraContextItems(section.items));
+      var contentEl = sectionEl.querySelector('.jira-context-section-content');
+      section.items.forEach(function (item) {
+        if (!item || !contentEl) return;
+        var itemEl = document.createElement('div');
+        itemEl.className = 'jira-context-section-item';
+        itemEl.textContent = String(item);
+        itemEl.title = String(item);
+        contentEl.appendChild(itemEl);
+      });
+      jiraContextCommitsEl.appendChild(sectionEl);
+    });
+
+    var commits = Array.isArray(context.commits) ? context.commits : [];
+    var commitsSection = createJiraContextSection(context, 'Коммиты', commits.length);
+    var commitsContentEl = commitsSection.querySelector('.jira-context-section-content');
+    if (!commits.length && commitsContentEl) {
+      var emptyCommits = document.createElement('div');
+      emptyCommits.className = 'jira-context-section-item muted';
+      emptyCommits.textContent = 'не найдены' + (context.repositoriesChecked ? ' · проверено репозиториев: ' + context.repositoriesChecked : '');
+      commitsContentEl.appendChild(emptyCommits);
+    }
+
+    commits.slice(0, 8).forEach(function (commit) {
+      var card = document.createElement('div');
+      card.className = 'jira-context-commit';
+
+      var line = document.createElement('div');
+      line.className = 'jira-context-commit-line';
+      line.textContent = [
+        commit.shortHash || commit.hash || '',
+        commit.date || '',
+        commit.author || '',
+        commit.subject || ''
+      ].filter(Boolean).join(' • ');
+
+      var repo = document.createElement('div');
+      repo.className = 'jira-context-commit-repo';
+      repo.textContent = [
+        commit.repository || '',
+        commit.currentBranch ? 'текущая ветка: ' + commit.currentBranch : ''
+      ].filter(Boolean).join(' • ');
+
+      var branches = document.createElement('div');
+      branches.className = 'jira-context-commit-branches';
+      branches.textContent = commit.branches && commit.branches.length
+        ? 'Ветки: ' + commit.branches.join(', ')
+        : 'Ветки: не найдены';
+
+      var suggestion = document.createElement('div');
+      suggestion.className = 'jira-context-commit-suggestion';
+      suggestion.textContent = commit.suggestion || '';
+
+      card.appendChild(line);
+      card.appendChild(repo);
+      card.appendChild(branches);
+      if (commit.suggestion) card.appendChild(suggestion);
+      if (commitsContentEl) commitsContentEl.appendChild(card);
+    });
+    jiraContextCommitsEl.appendChild(commitsSection);
+  }
+
+  function updateJiraContextToggle(available) {
+    if (!toggleJiraContextBtn) return;
+    toggleJiraContextBtn.classList.toggle('hidden', !available);
+    toggleJiraContextBtn.classList.toggle('is-active', !!available && jiraContextPanelOpen);
+    toggleJiraContextBtn.setAttribute('aria-expanded', available && jiraContextPanelOpen ? 'true' : 'false');
+    toggleJiraContextBtn.setAttribute(
+      'title',
+      jiraContextPanelOpen ? 'Скрыть информацию по задаче' : 'Показать информацию по задаче'
+    );
+    toggleJiraContextBtn.setAttribute(
+      'aria-label',
+      jiraContextPanelOpen ? 'Скрыть информацию по задаче' : 'Показать информацию по задаче'
+    );
+  }
+
+  function createJiraContextSection(context, title, count) {
+    var key = [context && context.issueKey ? context.issueKey : 'jira', title || 'section'].join(':');
+    var details = document.createElement('details');
+    details.className = 'jira-context-section';
+    details.open = jiraContextOpenSections[key] === true;
+    details.addEventListener('toggle', function () {
+      jiraContextOpenSections[key] = details.open;
+      persistUiState();
+    });
+
+    var summary = document.createElement('summary');
+    summary.className = 'jira-context-section-summary';
+
+    var titleEl = document.createElement('span');
+    titleEl.className = 'jira-context-section-title';
+    titleEl.textContent = title || 'Блок';
+
+    var countEl = document.createElement('span');
+    countEl.className = 'jira-context-section-count';
+    countEl.textContent = String(Math.max(0, Number(count) || 0));
+
+    summary.appendChild(titleEl);
+    summary.appendChild(countEl);
+    details.appendChild(summary);
+
+    var content = document.createElement('div');
+    content.className = 'jira-context-section-content';
+    details.appendChild(content);
+    return details;
+  }
+
+  function countJiraContextItems(items) {
+    if (!Array.isArray(items)) return 0;
+    return items.filter(function (item) {
+      return item && !/^ещё\s+\d+/i.test(String(item).trim());
+    }).length;
+  }
+
   function updateTaskPanelState(payload) {
     var hasTasks = !!(payload && payload.hasTasks);
     taskPanelAvailable = hasTasks;
@@ -912,9 +1157,12 @@
     var contextEstimatedTokens = Number(context.estimatedInputTokens || 0);
     var contextPromptTokens = Number(context.lastPromptTokens || 0);
     var contextCompletionTokens = Number(context.lastCompletionTokens || 0);
-    var contextTotalTokens = Number(context.lastTotalTokens || 0);
-    var contextModel = context && context.model ? String(context.model) : '';
-    var connectionVisible = !!connectionSummary && connectionState === 'reconnecting';
+        var contextTotalTokens = Number(context.lastTotalTokens || 0);
+        var contextModel = context && context.model ? String(context.model) : '';
+        if (trace && typeof trace.updateModelUsage === 'function') {
+          trace.updateModelUsage(context);
+        }
+        var connectionVisible = !!connectionSummary && connectionState === 'reconnecting';
     var visible = !!summary && state !== 'idle';
     var contextVisible = contextMessageCount > 0 || contextChars > 0 || contextTotalTokens > 0;
     var activityVisible = !!activitySummary && (state === 'running' || state === 'waiting') && activitySummary !== summary;
@@ -1081,6 +1329,7 @@
     if (!text || agentRunning) return;
     vscode.postMessage({ type: 'send', text: text });
     trace.appendMessage(text, 'user');
+    metrics.recordUserRequest();
     followups.markRequestStarted();
     inputEl.value = '';
     setLoading(true);
@@ -1155,9 +1404,15 @@
         trace.appendMessage(artifact.payload.text, 'error');
         return;
       }
-      if (changes && changes.replayArtifact) {
-        changes.replayArtifact(artifact);
-        var syntheticResolution = buildReplayResolutionForOrphanedArtifact(artifact);
+          if (changes && changes.replayArtifact) {
+            changes.replayArtifact(artifact);
+            if (artifact.kind === 'fileChange' && trace && typeof trace.recordFileChangeForRun === 'function') {
+              trace.recordFileChangeForRun(
+                artifact.runId && replayedRunsById[artifact.runId] ? replayedRunsById[artifact.runId] : null,
+                artifact.payload || {}
+              );
+            }
+            var syntheticResolution = buildReplayResolutionForOrphanedArtifact(artifact);
         if (syntheticResolution) {
           changes.replayArtifact(syntheticResolution);
         }
@@ -1367,6 +1622,17 @@
       });
     }
 
+    if (toggleJiraContextBtn) {
+      toggleJiraContextBtn.addEventListener('click', function () {
+        if (!currentJiraContextKey) return;
+        jiraContextPanelOpen = !jiraContextPanelOpen;
+        if (jiraContextPanelEl) {
+          jiraContextPanelEl.classList.toggle('hidden', !jiraContextPanelOpen);
+        }
+        updateJiraContextToggle(true);
+      });
+    }
+
     Array.prototype.forEach.call(composerPermissionPresetEls || [], function (button) {
       if (!button) return;
       button.addEventListener('click', function (event) {
@@ -1461,6 +1727,7 @@
       trace.finishRun('done', 'Готово.');
       setLoading(false);
       trace.appendMessage(msg.text, 'assistant');
+      metrics.recordAssistantResponse();
     },
     error: function (msg) {
       runtimeProgressState = 'error';
@@ -1474,9 +1741,11 @@
     },
     traceReset: function () {
       trace.startRun();
+      metrics.recordAgentRunStarted();
     },
     traceEvent: function (msg) {
       trace.handleTraceEvent(msg);
+      metrics.recordTraceEvent(msg);
     },
     approvalRequest: function (msg) {
       changes.appendApprovalRequest(msg.request);
@@ -1514,10 +1783,20 @@
         feedbackPlaceholder: 'Комментарий для доработки плана (необязательно)'
       });
     },
-    fileChange: function (msg) {
-      changes.appendFileChange(msg);
-    },
-    changeAccepted: function (msg) {
+        fileChange: function (msg) {
+          changes.appendFileChange(msg);
+          metrics.recordFileChange(msg);
+          if (trace && typeof trace.recordFileChange === 'function') {
+            trace.recordFileChange(msg);
+          }
+        },
+        changeMetrics: function (msg) {
+          metrics.recordChangeMetrics(msg.metrics || {});
+          if (trace && typeof trace.updateChangeMetrics === 'function') {
+            trace.updateChangeMetrics(msg.metrics || {});
+          }
+        },
+        changeAccepted: function (msg) {
       changes.markChangeStatus(msg.changeId, true);
     },
     changeRejected: function (msg) {
@@ -1534,9 +1813,11 @@
     },
     checkpointReverted: function (msg) {
       changes.markCheckpointReverted(msg);
+      metrics.recordCheckpointReverted(msg);
     },
     undoRevertDone: function (msg) {
       changes.handleUndoRevertDone(msg);
+      metrics.recordUndoRevert(msg);
     },
     checkpointBranchCommitted: function (msg) {
       changes.handleCheckpointBranchCommitted(msg);
@@ -1552,8 +1833,10 @@
     },
     conversationState: function (msg) {
       followups.restore(msg);
+      metrics.resetFromSnapshot(msg.messages, msg.traceRuns, msg.artifactEvents);
       updateRuntimeState(msg.agentMode, msg.awaitingPlanApproval, msg.pendingApproval, msg.pendingQuestion);
       updateRuntimeProgress(msg.progress);
+      updateJiraContext(msg.jiraContext || null);
       updateSessionMemory(msg.sessionMemory);
       renderComposerPermissions(msg.autoApproval || composerPermissionsState);
       runtimeTodos = Array.isArray(msg.todos) ? msg.todos.slice() : [];

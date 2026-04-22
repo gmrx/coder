@@ -1,6 +1,6 @@
 import type { AssistantConfig } from '../core/types';
 
-export type SettingsSectionId = 'models' | 'mcp' | 'web';
+export type SettingsSectionId = 'models' | 'jira' | 'mcp' | 'web';
 
 export interface SettingsModelIssue {
   kind: 'chat-model-missing';

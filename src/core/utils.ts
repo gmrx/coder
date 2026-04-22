@@ -128,9 +128,30 @@ export function trimContext(messages: ChatMessage[]): void {
       if (msg.content.length > 400) {
         const oldLen = msg.content.length;
         const toolName = msg.content.match(/\[(?:Результат|Авто-контекст)\s*(\w+)/)?.[1] || '';
-        messages[i] = { role: 'user', content: msg.content.slice(0, 300) + `\n... (результат ${toolName} усечён)` };
+        messages[i] = {
+          role: 'user',
+          content: compactRuntimeToolMessage(msg.content, toolName || 'tool'),
+        };
         total -= oldLen - messages[i].content.length;
       }
     }
   }
+}
+
+function compactRuntimeToolMessage(content: string, toolName: string): string {
+  const normalized = String(content || '').trim();
+  const headBudget = 700;
+  const tailBudget = 520;
+  if (normalized.length <= headBudget + tailBudget + 240) return normalized;
+
+  const head = normalized.slice(0, headBudget).trimEnd();
+  const tail = normalized.slice(Math.max(0, normalized.length - tailBudget)).trimStart();
+  return [
+    head,
+    '',
+    `[Сжато для контекстного окна: результат ${toolName}]`,
+    `Исходный размер: ${normalized.length} символов. Сохранены начало и конец; середина заменена явной compact boundary, чтобы не удалять контекст молча.`,
+    '',
+    tail,
+  ].join('\n');
 }

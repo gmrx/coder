@@ -16,12 +16,14 @@ import {
   TOOL_CALL_TEMPERATURE,
 } from './loopPolicy';
 import { AgentSession } from './agentSession';
+import { compactMessagesForPromptRetry } from './contextPacking';
 import { executeLoopDirective } from './executeLoopDirective';
 import { resolveLoopDirective } from './loopDirectives';
 import { createTurnLoopState } from './turnState';
 
 export async function runAgentTurnLoop(session: AgentSession): Promise<string> {
   const state = createTurnLoopState();
+  let reactiveCompactRetries = 0;
 
   while (true) {
     if (session.signal?.aborted) return USER_ABORT_MESSAGE;
@@ -90,6 +92,18 @@ export async function runAgentTurnLoop(session: AgentSession): Promise<string> {
     } catch (error: any) {
       const message = error?.message || String(error);
       if (String(message).startsWith(USER_ABORT_MESSAGE)) return String(message);
+      if (
+        reactiveCompactRetries < 2 &&
+        isPromptTooLongError(message) &&
+        compactMessagesForPromptRetry(session.messages)
+      ) {
+        reactiveCompactRetries++;
+        session.trace.loop('Контекст переполнен, выполняю reactive compact и повторяю запрос.', {
+          retry: reactiveCompactRetries,
+          error: message,
+        });
+        continue;
+      }
       return `Ошибка API: ${message}`;
     }
 
@@ -104,4 +118,8 @@ export async function runAgentTurnLoop(session: AgentSession): Promise<string> {
     buildLoopExitFinalPromptContract(session.lastQuestion),
     state.iteration,
   );
+}
+
+function isPromptTooLongError(message: string): boolean {
+  return /prompt.*too.*long|context.*length|maximum context|too many tokens|413|input.*too.*long|контекст|токен/i.test(String(message || ''));
 }

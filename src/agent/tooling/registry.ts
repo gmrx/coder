@@ -5,6 +5,7 @@ import { catalogToolHandlers } from './handlers/catalogTools';
 import { codeToolHandlers } from './handlers/codeTools';
 import { editToolHandlers } from './handlers/editTools';
 import { externalToolHandlers } from './handlers/externalTools';
+import { jiraToolHandlers } from './handlers/jiraTools';
 import { mcpToolHandlers } from './handlers/mcpTools';
 import { projectToolHandlers } from './handlers/projectTools';
 import { taskToolHandlers } from './handlers/taskTools';
@@ -20,6 +21,7 @@ export function createToolHandlers(
     ...codeToolHandlers,
     ...editToolHandlers,
     ...externalToolHandlers,
+    ...jiraToolHandlers,
     ...mcpToolHandlers,
     ...taskToolHandlers,
     ...worktreeToolHandlers,

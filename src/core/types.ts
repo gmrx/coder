@@ -66,5 +66,8 @@ export interface AssistantConfig {
   mcpTrustedTools: string[];
   webTrustedHosts: string[];
   webBlockedHosts: string[];
+  jiraBaseUrl: string;
+  jiraUsername: string;
+  jiraPassword: string;
   autoApproval: AssistantAutoApprovalConfig;
 }

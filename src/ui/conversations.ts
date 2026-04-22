@@ -12,6 +12,7 @@ const MAX_MESSAGES_PER_CONVERSATION = 120;
 export interface StoredConversationSession {
   id: string;
   title: string;
+  source: ConversationSource;
   createdAt: number;
   updatedAt: number;
   messages: ChatMessage[];
@@ -23,12 +24,27 @@ export interface StoredConversationSession {
   artifactEvents: PersistedChatArtifact[];
 }
 
+export type ConversationSource =
+  | { type: 'free' }
+  | {
+    type: 'jira';
+    projectKey: string;
+    projectName: string;
+    issueKey: string;
+    issueTitle: string;
+    issueUrl: string;
+    issueStatus: string;
+    issueDescription: string;
+  };
+
 export interface ConversationSummaryDto {
   id: string;
   title: string;
+  source: ConversationSource;
   updatedAt: number;
   messageCount: number;
   preview: string;
+  virtual?: boolean;
 }
 
 interface PersistedConversationState {
@@ -66,13 +82,15 @@ export class ConversationStore {
     return cloneConversation(created);
   }
 
-  listSummaries(): ConversationSummaryDto[] {
+  listSummaries(scope: ConversationListScope = { type: 'free' }): ConversationSummaryDto[] {
     return this.state.conversations
+      .filter((conversation) => conversationMatchesScope(conversation, scope))
       .slice()
       .sort((left, right) => right.updatedAt - left.updatedAt)
       .map((conversation) => ({
         id: conversation.id,
         title: conversation.title,
+        source: cloneConversationSource(conversation.source),
         updatedAt: conversation.updatedAt,
         messageCount: conversation.messages.length,
         preview: buildPreview(conversation.messages),
@@ -93,7 +111,7 @@ export class ConversationStore {
     active.traceRuns = normalizeTraceRuns(snapshot.traceRuns);
     active.artifactEvents = normalizeArtifactEvents(snapshot.artifactEvents);
     active.updatedAt = Date.now();
-    active.title = buildTitle(active.messages);
+    active.title = buildConversationTitle(active.source, active.messages);
     this.trim();
     await this.persist();
     return cloneConversation(active);
@@ -108,8 +126,55 @@ export class ConversationStore {
     await this.persist();
   }
 
-  async createConversation(): Promise<StoredConversationSession> {
-    const created = createEmptyConversation();
+  findJiraConversation(issueKey: string): StoredConversationSession | null {
+    const normalizedIssueKey = normalizeKey(issueKey);
+    if (!normalizedIssueKey) return null;
+    const found = this.state.conversations.find((conversation) =>
+      conversation.source.type === 'jira' && normalizeKey(conversation.source.issueKey) === normalizedIssueKey,
+    );
+    return found ? cloneConversation(found) : null;
+  }
+
+  async updateConversationSource(id: string, source: ConversationSource): Promise<StoredConversationSession | null> {
+    const conversation = this.state.conversations.find((item) => item.id === id);
+    if (!conversation) return null;
+    conversation.source = normalizeConversationSource(source);
+    conversation.title = buildConversationTitle(conversation.source, conversation.messages);
+    conversation.updatedAt = Date.now();
+    this.trim();
+    await this.persist();
+    return cloneConversation(conversation);
+  }
+
+  async removeGeneratedJiraContextMessages(id: string): Promise<StoredConversationSession | null> {
+    const conversation = this.state.conversations.find((item) => item.id === id);
+    if (!conversation) return null;
+    if (conversation.source.type !== 'jira') return cloneConversation(conversation);
+    const issueKey = conversation.source.issueKey;
+
+    const nextMessages = conversation.messages.filter((message) =>
+      !isGeneratedJiraContextMessage(message, issueKey),
+    );
+    if (nextMessages.length === conversation.messages.length) {
+      return cloneConversation(conversation);
+    }
+
+    conversation.messages = nextMessages;
+    conversation.agentRuntime = null;
+    if (conversation.messages.length === 0) {
+      conversation.suggestions = [];
+      conversation.suggestionsState = 'starters';
+    }
+    conversation.suggestionsSummary = defaultSuggestionsSummary(conversation.messages.length > 0);
+    conversation.title = buildConversationTitle(conversation.source, conversation.messages);
+    conversation.updatedAt = Date.now();
+    this.trim();
+    await this.persist();
+    return cloneConversation(conversation);
+  }
+
+  async createConversation(source: ConversationSource = { type: 'free' }): Promise<StoredConversationSession> {
+    const created = createEmptyConversation(source);
     this.state.activeId = created.id;
     this.state.conversations.unshift(created);
     this.trim();
@@ -136,7 +201,7 @@ export class ConversationStore {
     active.suggestionsSummary = defaultSuggestionsSummary(false);
     active.traceRuns = [];
     active.artifactEvents = [];
-    active.title = 'Новый чат';
+    active.title = buildConversationTitle(active.source, active.messages);
     active.updatedAt = Date.now();
     await this.persist();
     return cloneConversation(active);
@@ -221,11 +286,17 @@ export class ConversationStore {
   }
 }
 
-function createEmptyConversation(): StoredConversationSession {
+export type ConversationListScope =
+  | { type: 'free' }
+  | { type: 'jira'; projectKey: string };
+
+function createEmptyConversation(source: ConversationSource = { type: 'free' }): StoredConversationSession {
   const now = Date.now();
+  const normalizedSource = normalizeConversationSource(source);
   return {
     id: `chat-${now}-${Math.random().toString(36).slice(2, 6)}`,
-    title: 'Новый чат',
+    title: buildConversationTitle(normalizedSource, []),
+    source: normalizedSource,
     createdAt: now,
     updatedAt: now,
     messages: [],
@@ -244,9 +315,13 @@ function normalizeConversation(value: any): StoredConversationSession | null {
   const suggestions = normalizeSuggestions(Array.isArray(value.suggestions) ? value.suggestions : []);
   const createdAt = Number.isFinite(value.createdAt) ? Number(value.createdAt) : Date.now();
   const updatedAt = Number.isFinite(value.updatedAt) ? Number(value.updatedAt) : createdAt;
+  const source = normalizeConversationSource(value.source);
   return {
     id: typeof value.id === 'string' && value.id ? value.id : `chat-${updatedAt}`,
-    title: typeof value.title === 'string' && value.title.trim() ? value.title.trim().slice(0, 80) : buildTitle(messages),
+    title: typeof value.title === 'string' && value.title.trim()
+      ? value.title.trim().slice(0, 120)
+      : buildConversationTitle(source, messages),
+    source,
     createdAt,
     updatedAt,
     messages,
@@ -269,6 +344,14 @@ function normalizeMessages(messages: ChatMessage[]): ChatMessage[] {
       role: message.role,
       content: message.content,
     }));
+}
+
+function isGeneratedJiraContextMessage(message: ChatMessage, issueKey: string): boolean {
+  if (!message || message.role !== 'assistant') return false;
+  const content = String(message.content || '').trim();
+  const key = normalizeKey(issueKey);
+  return content.startsWith(`Контекст Jira-задачи ${key}`)
+    && content.includes(`Git-контекст по ${key}:`);
 }
 
 function normalizeSuggestions(suggestions: FollowupSuggestion[]): FollowupSuggestion[] {
@@ -355,6 +438,13 @@ function buildTitle(messages: ChatMessage[]): string {
   return firstUser.content.replace(/\s+/g, ' ').trim().slice(0, 48) || 'Новый чат';
 }
 
+function buildConversationTitle(source: ConversationSource, messages: ChatMessage[]): string {
+  if (source.type === 'jira') {
+    return `${source.issueKey} • ${source.issueTitle || 'Задача Jira'}`.replace(/\s+/g, ' ').trim().slice(0, 120);
+  }
+  return buildTitle(messages);
+}
+
 function buildPreview(messages: ChatMessage[]): string {
   const last = [...messages].reverse().find((message) => message.content.trim());
   if (!last) return 'Пустой чат';
@@ -364,6 +454,7 @@ function buildPreview(messages: ChatMessage[]): string {
 function cloneConversation(conversation: StoredConversationSession): StoredConversationSession {
   return {
     ...conversation,
+    source: cloneConversationSource(conversation.source),
     messages: conversation.messages.map((message) => ({ ...message })),
     agentRuntime: conversation.agentRuntime ? {
       mode: conversation.agentRuntime.mode,
@@ -392,6 +483,53 @@ function cloneConversation(conversation: StoredConversationSession): StoredConve
     })),
     artifactEvents: conversation.artifactEvents.map((artifact) => cloneArtifactEvent(artifact)),
   };
+}
+
+function conversationMatchesScope(conversation: StoredConversationSession, scope: ConversationListScope): boolean {
+  if (scope.type === 'jira') {
+    return conversation.source.type === 'jira'
+      && normalizeKey(conversation.source.projectKey) === normalizeKey(scope.projectKey);
+  }
+  return conversation.source.type === 'free';
+}
+
+export function normalizeConversationSource(value: any): ConversationSource {
+  if (value && typeof value === 'object' && value.type === 'jira') {
+    const issueKey = normalizeKey(value.issueKey);
+    const projectKey = normalizeKey(value.projectKey || issueKey.split('-')[0]);
+    if (issueKey && projectKey) {
+      return {
+        type: 'jira',
+        projectKey,
+        projectName: firstText(value.projectName, projectKey).slice(0, 160),
+        issueKey,
+        issueTitle: firstText(value.issueTitle, value.title, issueKey).slice(0, 240),
+        issueUrl: firstText(value.issueUrl, value.url).slice(0, 500),
+        issueStatus: firstText(value.issueStatus, value.status).slice(0, 120),
+        issueDescription: firstText(value.issueDescription, value.description).slice(0, 4_000),
+      };
+    }
+  }
+  return { type: 'free' };
+}
+
+function cloneConversationSource(source: ConversationSource): ConversationSource {
+  return source.type === 'jira'
+    ? { ...source }
+    : { type: 'free' };
+}
+
+function normalizeKey(value: unknown): string {
+  return String(value || '').trim().toUpperCase();
+}
+
+function firstText(...values: unknown[]): string {
+  for (const value of values) {
+    if (value === undefined || value === null) continue;
+    const text = String(value).trim();
+    if (text) return text;
+  }
+  return '';
 }
 
 function normalizeTraceRuns(value: any): PersistedTraceRun[] {

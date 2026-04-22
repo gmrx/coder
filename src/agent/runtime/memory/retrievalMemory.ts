@@ -50,6 +50,10 @@ export class RetrievalMemory {
     const status = result && typeof result !== 'string' ? result.status : 'success';
     const isSuccessful = status === 'success' || status === 'degraded';
 
+    if ((tool === 'jira_list_projects' || tool === 'jira_search_tasks' || tool === 'jira_get_task') && isSuccessful) {
+      this.addFact(`Jira: ${truncate(content, 320)}`);
+    }
+
     if (tool === 'list_mcp_tools' && isSuccessful) {
       const summary = getStructuredSummary(result);
       const preview = getStructuredPreview(result);

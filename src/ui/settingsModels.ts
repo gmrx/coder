@@ -95,6 +95,9 @@ export function normalizeSettingsPayload(data: SettingsPayload): AssistantConfig
     mcpTrustedTools: normalizeMcpTrustedTools(data.mcpTrustedTools),
     webTrustedHosts: normalizeHostList(data.webTrustedHosts),
     webBlockedHosts: normalizeHostList(data.webBlockedHosts),
+    jiraBaseUrl: String(data.jiraBaseUrl || '').trim(),
+    jiraUsername: String(data.jiraUsername || '').trim(),
+    jiraPassword: String(data.jiraPassword || '').trim(),
     autoApproval: normalizeAutoApproval(data.autoApproval),
   };
 }

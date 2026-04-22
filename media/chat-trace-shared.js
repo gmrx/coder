@@ -118,6 +118,9 @@
       shell: 'shell-команда',
       web_search: 'веб-поиск',
       web_fetch: 'загрузка URL',
+      jira_list_projects: 'проекты Jira',
+      jira_search_tasks: 'задачи Jira',
+      jira_get_task: 'задача Jira',
       list_mcp_resources: 'ресурсы MCP',
       read_mcp_resource: 'чтение MCP ресурса'
     };

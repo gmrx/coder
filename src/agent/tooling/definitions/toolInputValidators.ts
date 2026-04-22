@@ -180,6 +180,29 @@ export const TOOL_INPUT_VALIDATORS: Partial<Record<string, ToolInputValidator>> 
     }
     return null;
   },
+  jira_list_projects(args) {
+    return validateLimitOffset('jira_list_projects', args);
+  },
+  jira_search_tasks(args) {
+    const paginationError = validateLimitOffset('jira_search_tasks', {
+      limit: args?.limit ?? args?.maxResults ?? args?.max_results,
+      offset: args?.offset ?? args?.startAt ?? args?.start_at,
+    });
+    if (paginationError) return paginationError;
+    if (args?.fields !== undefined && typeof args.fields !== 'string' && !Array.isArray(args.fields)) {
+      return 'Для "jira_search_tasks" args.fields должен быть строкой или массивом';
+    }
+    return null;
+  },
+  jira_get_task(args) {
+    if (!hasAny(args, ['key', 'issueKey', 'issue_key', 'id'])) {
+      return 'Для "jira_get_task" обязателен args.key';
+    }
+    if (args?.fields !== undefined && typeof args.fields !== 'string' && !Array.isArray(args.fields)) {
+      return 'Для "jira_get_task" args.fields должен быть строкой или массивом';
+    }
+    return null;
+  },
   list_mcp_resources(args) {
     return args?.server === undefined || hasText(args?.server)
       ? null

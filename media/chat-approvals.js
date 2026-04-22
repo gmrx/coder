@@ -665,6 +665,8 @@
       { text: buildFileChangeLabel(request.changeType), kind: request.changeType === 'delete' ? 'danger' : 'file' },
       typeof request.cellIdx === 'number' ? { text: 'ячейка ' + request.cellIdx, kind: 'notebook' } : null,
       request.language ? { text: request.language, kind: 'notebook' } : null,
+      request.stats && Number.isFinite(request.stats.added) ? { text: '+' + request.stats.added, kind: 'add' } : null,
+      request.stats && Number.isFinite(request.stats.removed) ? { text: '-' + request.stats.removed, kind: 'del' } : null,
       request.stats ? { text: (request.stats.beforeLines || 0) + ' -> ' + (request.stats.afterLines || 0) + ' строк', kind: 'lines' } : null,
       request.stats ? { text: formatBytes(request.stats.oldBytes || 0) + ' -> ' + formatBytes(request.stats.newBytes || 0), kind: 'bytes' } : null,
       request.stats && request.stats.changedLines ? { text: '~' + request.stats.changedLines + ' строк изменено', kind: 'delta' } : null

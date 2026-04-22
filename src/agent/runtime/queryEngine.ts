@@ -10,7 +10,12 @@ import {
   resetBackgroundProgressState,
   type BackgroundProgressState,
 } from './backgroundProgressSummary';
-import { createCompactionState, maybeCompactConversation, resetCompactionState, type AgentCompactionState } from './compaction';
+import {
+  createCompactionState,
+  maybeCompactConversationWithModel,
+  resetCompactionState,
+  type AgentCompactionState,
+} from './compaction';
 import { createAgentRuntime } from './modelGateway';
 import { createAgentProgressState, finishAgentProgress, hydrateAgentProgress, startAgentProgress, updateAgentProgressFromStep } from './progressSummary';
 import { summarizeApprovalRequest } from './runtimeEventPresentation';
@@ -31,6 +36,7 @@ import type { AgentQuestionRequest } from './questions';
 import type { AgentWorktreeSession } from '../worktreeSession';
 import type {
   AgentQueryEngineInitParams,
+  AgentRuntimeContext,
   AgentRuntimeSnapshot,
   AgentTurnInput,
   AgentTurnExecutionParams,
@@ -215,6 +221,12 @@ export class AgentQueryEngine {
       onContextUsage: (messages, model, usage) => {
         const requestChanged = updateAgentContextWindowRequest(this.progress.context, messages, model);
         const usageChanged = applyAgentContextWindowUsage(this.progress.context, usage);
+        void params.onStep?.('agent-model-usage', 'Использование модели обновлено.', {
+          model,
+          promptTokens: usage.promptTokens || 0,
+          completionTokens: usage.completionTokens || 0,
+          totalTokens: usage.totalTokens || 0,
+        });
         this.emitProgressChange(requestChanged || usageChanged);
       },
     });
@@ -227,7 +239,7 @@ export class AgentQueryEngine {
       ...this.rawMessages,
       { role: 'user' as const, content: input.question },
     ];
-    const effectiveHistory = this.getEffectiveHistory(nextHistory, params);
+    const effectiveHistory = await this.getEffectiveHistory(nextHistory, params, runtime.runtime);
 
     const prepared = prepareAgentTurnInput({
       ...input,
@@ -351,15 +363,21 @@ export class AgentQueryEngine {
     }
   }
 
-  private getEffectiveHistory(
+  private async getEffectiveHistory(
     nextHistory: ChatMessage[],
     params: AgentTurnExecutionParams,
-  ): ChatMessage[] {
-    const compacted = maybeCompactConversation(nextHistory, this.sessionMemory.summary, this.compaction);
+    runtime: AgentRuntimeContext,
+  ): Promise<ChatMessage[]> {
+    const compacted = await maybeCompactConversationWithModel(nextHistory, this.sessionMemory.summary, this.compaction, runtime);
     if (compacted.compacted) {
-      params.onStep?.('agent-memory', 'Сжимаю раннюю историю диалога в память сессии.', {
+      params.onStep?.('agent-memory', compacted.kind === 'model'
+        ? 'Сжимаю раннюю историю диалога модельной автосводкой.'
+        : 'Сжимаю раннюю историю диалога эвристической сводкой.',
+      {
         compactCount: this.compaction.compactCount,
         keptMessages: compacted.messages.length,
+        kind: compacted.kind || 'unknown',
+        error: compacted.error || '',
       });
     }
     return compacted.messages;

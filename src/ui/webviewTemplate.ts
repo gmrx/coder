@@ -23,6 +23,7 @@ interface WebviewAssetUris {
   checkpointsJsUri: vscode.Uri;
   changesJsUri: vscode.Uri;
   followupsJsUri: vscode.Uri;
+  metricsJsUri: vscode.Uri;
   settingsJsUri: vscode.Uri;
   settingsPanelJsUri: vscode.Uri;
   appJsUri: vscode.Uri;
@@ -52,6 +53,7 @@ function getAssetUris(webview: vscode.Webview, extensionUri: vscode.Uri): Webvie
     checkpointsJsUri: webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', 'chat-checkpoints.js')),
     changesJsUri: webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', 'chat-changes.js')),
     followupsJsUri: webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', 'chat-followups.js')),
+    metricsJsUri: webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', 'chat-metrics.js')),
     settingsJsUri: webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', 'chat-settings.js')),
     settingsPanelJsUri: webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', 'settings-panel.js')),
     appJsUri: webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', 'chat-app.js')),
@@ -67,6 +69,10 @@ function getSettingsMarkup(cancelLabel: string): string {
           <button class="settings-nav-item is-active" type="button" data-settings-nav="models">
             <span class="settings-nav-label">Модели</span>
             <span class="settings-nav-desc">Подключение API и выбор моделей</span>
+          </button>
+          <button class="settings-nav-item" type="button" data-settings-nav="jira">
+            <span class="settings-nav-label">Jira</span>
+            <span class="settings-nav-desc">Хост, логин и пароль</span>
           </button>
           <button class="settings-nav-item" type="button" data-settings-nav="mcp">
             <span class="settings-nav-label">MCP</span>
@@ -125,6 +131,44 @@ function getSettingsMarkup(cancelLabel: string): string {
                     <div class="field-desc">Постоянные инструкции для агента: стиль работы, ограничения, предпочтения и правила, которым нужно следовать во всех запросах.</div>
                     <textarea id="s_systemPrompt" class="field-input field-textarea" spellcheck="false" rows="8" placeholder="Например: всегда сначала проверяй Dockerfile и docker-compose, отвечай короче, не меняй файлы без явной необходимости."></textarea>
                   </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="settings-pane" data-settings-pane="jira">
+              <div class="settings-pane-header">
+                <div class="settings-pane-title">Jira</div>
+                <div class="settings-pane-desc">Настрой доступ к сервису задач для чтения проектов и задач агентом.</div>
+              </div>
+              <div class="settings-section">
+                <div class="settings-section-header"><span>Подключение Jira</span><button class="btn btn-secondary btn-xs" id="jiraCheckBtn" type="button">Проверить Jira</button></div>
+                <div class="settings-section-body">
+                  <div class="field">
+                    <div class="field-label">Хост Jira <span class="badge badge-required">обязательно</span></div>
+                    <div class="field-desc">Базовый адрес сервиса задач.</div>
+                    <input id="s_jiraBaseUrl" class="field-input" spellcheck="false" placeholder="https://jira.example.local" />
+                  </div>
+                  <div class="field">
+                    <div class="field-label">Логин <span class="badge badge-optional">необязательно</span></div>
+                    <div class="field-desc">Оставь пустым, если доступны публичные задачи.</div>
+                    <input id="s_jiraUsername" class="field-input" spellcheck="false" autocomplete="username" placeholder="username" />
+                  </div>
+                  <div class="field">
+                    <div class="field-label">Пароль <span class="badge badge-optional">необязательно</span></div>
+                    <div class="field-desc">Можно указать пароль или персональный токен, если Jira его принимает.</div>
+                    <div class="field-input-wrap">
+                      <input id="s_jiraPassword" class="field-input has-btn" type="password" spellcheck="false" autocomplete="current-password" placeholder="пароль или токен" />
+                      <button class="field-input-btn" id="toggleJiraPasswordBtn" type="button" title="Показать / скрыть">&#128065;</button>
+                    </div>
+                  </div>
+                  <div id="jiraStatusCard" class="settings-status-card is-compact">
+                    <div class="settings-status-row">
+                      <span id="jiraStatusDot" class="conn-dot idle"></span>
+                      <span id="jiraStatusText">Jira ещё не проверялась.</span>
+                    </div>
+                    <div id="jiraStatusMeta" class="settings-status-meta">Проверка покажет пользователя, количество проектов и задачи пользователя с названием и описанием.</div>
+                  </div>
+                  <div id="jiraProjectList" class="jira-project-list"></div>
                 </div>
               </div>
             </div>
@@ -250,31 +294,51 @@ export function getChatViewHtml(webview: vscode.Webview, extensionUri: vscode.Ur
 <body>
   <div class="root app-shell">
     <header class="app-shell-header">
-      <div class="app-shell-chat-heading">
-        <div id="chatSessionTitle" class="chat-session-title">Новый чат</div>
-        <div id="chatSessionMeta" class="chat-session-meta">Нет сохранённых чатов</div>
+      <div class="app-shell-header-row">
+        <div class="app-shell-chat-heading">
+          <div id="chatSessionTitle" class="chat-session-title">Новый чат</div>
+          <div id="chatSessionMeta" class="chat-session-meta">Нет сохранённых чатов</div>
+        </div>
+        <div class="app-shell-actions">
+          <div id="chatModeBadge" class="chat-mode-badge hidden">Режим плана</div>
+          <button class="btn-icon app-shell-action-btn hidden" id="toggleJiraContextBtn" type="button" title="Показать информацию по задаче" aria-label="Показать информацию по задаче" aria-expanded="false">
+            <svg viewBox="0 0 16 16" focusable="false" aria-hidden="true">
+              <circle cx="8" cy="8" r="5.75"></circle>
+              <path d="M8 7.25v3.5"></path>
+              <path d="M8 5.1h.01"></path>
+            </svg>
+          </button>
+          <button class="btn-icon app-shell-action-btn" id="toggleChatSidebarBtn" type="button" title="Свернуть список чатов" aria-label="Свернуть список чатов" aria-pressed="false">
+            <svg class="app-shell-icon-sidebar" viewBox="0 0 16 16" focusable="false" aria-hidden="true">
+              <rect x="2.25" y="2.25" width="11.5" height="11.5" rx="1.75"></rect>
+              <path d="M6 2.75v10.5"></path>
+              <path class="sidebar-chevron" d="M10.25 5.5 8 8l2.25 2.5"></path>
+            </svg>
+          </button>
+          <button class="btn-icon app-shell-action-btn" id="quickNewChatBtn" type="button" title="Создать новый чат" aria-label="Создать новый чат">
+            <svg viewBox="0 0 16 16" focusable="false" aria-hidden="true">
+              <path d="M8 3.25v9.5"></path>
+              <path d="M3.25 8h9.5"></path>
+            </svg>
+          </button>
+          <button class="btn-icon app-shell-action-btn app-shell-settings-btn" id="openSettingsBtn" type="button" title="Открыть настройки" aria-label="Открыть настройки">
+            <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+              <path fill="currentColor" stroke="none" d="M19.14 12.94c.04-.31.06-.62.06-.94s-.02-.63-.06-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.48 7.48 0 0 0-1.63-.94l-.36-2.54A.5.5 0 0 0 13.9 2h-3.8a.5.5 0 0 0-.49.42l-.36 2.54c-.58.22-1.12.53-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.71 8.48a.5.5 0 0 0 .12.64l2.03 1.58c-.04.31-.06.62-.06.94s.02.63.06.94l-2.03 1.58a.5.5 0 0 0-.12.64l1.92 3.32a.5.5 0 0 0 .6.22l2.39-.96c.51.41 1.05.72 1.63.94l.36 2.54a.5.5 0 0 0 .49.42h3.8a.5.5 0 0 0 .49-.42l.36-2.54c.58-.22 1.12-.53 1.63-.94l2.39.96a.5.5 0 0 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58ZM12 15.5A3.5 3.5 0 1 1 15.5 12 3.5 3.5 0 0 1 12 15.5Z"></path>
+            </svg>
+          </button>
+        </div>
       </div>
-      <div class="app-shell-actions">
-        <div id="chatModeBadge" class="chat-mode-badge hidden">Режим плана</div>
-        <button class="btn-icon app-shell-action-btn" id="toggleChatSidebarBtn" type="button" title="Свернуть список чатов" aria-label="Свернуть список чатов" aria-pressed="false">
-          <svg class="app-shell-icon-sidebar" viewBox="0 0 16 16" focusable="false" aria-hidden="true">
-            <rect x="2.25" y="2.25" width="11.5" height="11.5" rx="1.75"></rect>
-            <path d="M6 2.75v10.5"></path>
-            <path class="sidebar-chevron" d="M10.25 5.5 8 8l2.25 2.5"></path>
-          </svg>
-        </button>
-        <button class="btn-icon app-shell-action-btn" id="quickNewChatBtn" type="button" title="Создать новый чат" aria-label="Создать новый чат">
-          <svg viewBox="0 0 16 16" focusable="false" aria-hidden="true">
-            <path d="M8 3.25v9.5"></path>
-            <path d="M3.25 8h9.5"></path>
-          </svg>
-        </button>
-        <button class="btn-icon app-shell-action-btn app-shell-settings-btn" id="openSettingsBtn" type="button" title="Открыть настройки" aria-label="Открыть настройки">
-          <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
-            <path fill="currentColor" stroke="none" d="M19.14 12.94c.04-.31.06-.62.06-.94s-.02-.63-.06-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.48 7.48 0 0 0-1.63-.94l-.36-2.54A.5.5 0 0 0 13.9 2h-3.8a.5.5 0 0 0-.49.42l-.36 2.54c-.58.22-1.12.53-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.71 8.48a.5.5 0 0 0 .12.64l2.03 1.58c-.04.31-.06.62-.06.94s.02.63.06.94l-2.03 1.58a.5.5 0 0 0-.12.64l1.92 3.32a.5.5 0 0 0 .6.22l2.39-.96c.51.41 1.05.72 1.63.94l.36 2.54a.5.5 0 0 0 .49.42h3.8a.5.5 0 0 0 .49-.42l.36-2.54c.58-.22 1.12-.53 1.63-.94l2.39.96a.5.5 0 0 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58ZM12 15.5A3.5 3.5 0 1 1 15.5 12 3.5 3.5 0 0 1 12 15.5Z"></path>
-          </svg>
-        </button>
-      </div>
+      <section id="jiraContextPanel" class="jira-context-panel hidden">
+        <div class="jira-context-header">
+          <div class="jira-context-heading">
+            <div id="jiraContextTitle" class="jira-context-title"></div>
+            <div id="jiraContextMeta" class="jira-context-meta"></div>
+          </div>
+          <a id="jiraContextLink" class="jira-context-link hidden" href="#" title="Открыть задачу Jira">Открыть</a>
+        </div>
+        <div id="jiraContextDescription" class="jira-context-description"></div>
+        <div id="jiraContextCommits" class="jira-context-commits"></div>
+      </section>
     </header>
 
     <div class="chat-workspace" id="chatWorkspace">
@@ -285,6 +349,15 @@ export function getChatViewHtml(webview: vscode.Webview, extensionUri: vscode.Ur
             <div class="chat-sidebar-meta">Список сохранённых диалогов проекта.</div>
           </div>
           <button class="btn btn-primary btn-xs" id="newChatBtn" type="button">Создать чат</button>
+        </div>
+        <div class="jira-chat-scope">
+          <div class="jira-chat-scope-row">
+            <select id="jiraProjectSelect" class="jira-chat-project-select" title="Выбрать проект Jira или обычный чат">
+              <option value="">Обычный чат</option>
+            </select>
+            <button class="btn btn-secondary btn-xs jira-chat-refresh" id="refreshJiraProjectsBtn" type="button" title="Обновить проекты и задачи Jira">↻</button>
+          </div>
+          <div id="jiraChatScopeStatus" class="jira-chat-scope-status">Обычный режим: чаты не связаны с Jira.</div>
         </div>
         <div id="chatSessionsList" class="chat-session-list"></div>
         <div class="chat-sidebar-footer">
@@ -384,6 +457,7 @@ export function getChatViewHtml(webview: vscode.Webview, extensionUri: vscode.Ur
               <span class="composer-tools-toggle-label">Автодействия</span>
             </button>
             <div id="chatContextUsage" class="chat-context-usage hidden"></div>
+            <div id="chatSessionMetrics" class="chat-session-metrics hidden"></div>
           </div>
           <div id="composerPermissionsPanel" class="composer-permissions-panel hidden">
             <div class="composer-permissions-header">Что агент может запускать без ожидания подтверждения</div>
@@ -508,6 +582,7 @@ export function getChatViewHtml(webview: vscode.Webview, extensionUri: vscode.Ur
   <script src="${assets.checkpointsJsUri}"></script>
   <script src="${assets.changesJsUri}"></script>
   <script src="${assets.followupsJsUri}"></script>
+  <script src="${assets.metricsJsUri}"></script>
   <script src="${assets.appJsUri}"></script>
 </body>
 </html>`;

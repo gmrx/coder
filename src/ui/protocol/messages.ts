@@ -22,7 +22,14 @@ import type {
   CheckpointUpdatedMessage,
   UndoRevertDoneMessage,
 } from './checkpoints';
-import type { ConnectionResultMessage, McpInspectionResultMessage, ModelTestsResultMessage, SettingsDataMessage, SettingsSavedMessage } from './settings';
+import type {
+  ConnectionResultMessage,
+  JiraCheckResultMessage,
+  McpInspectionResultMessage,
+  ModelTestsResultMessage,
+  SettingsDataMessage,
+  SettingsSavedMessage,
+} from './settings';
 import type { TasksStateMessage } from './tasks';
 import type { TraceEventMessage, TraceResetMessage } from './trace';
 
@@ -66,6 +73,23 @@ export interface ChangeStatusMessage {
   type: 'changeAccepted' | 'changeRejected';
   changeId: string;
   error?: string;
+}
+
+export interface ChangeMetricsPayload {
+  pendingFiles: number;
+  pendingChanges: number;
+  agentLines: number;
+  agentModifiedByUserLines: number;
+  agentRemovedLines: number;
+  agentDeletedByUserLines: number;
+  userOnlyLines: number;
+  userRemovedLines: number;
+  unknownFiles: number;
+}
+
+export interface ChangeMetricsMessage {
+  type: 'changeMetrics';
+  metrics: ChangeMetricsPayload;
 }
 
 export interface FileChangeMessagePayload {
@@ -116,6 +140,7 @@ export type ExtensionToWebviewMessage =
   | RuntimeStateMessage
   | ComposerPermissionsStateMessage
   | ChangeStatusMessage
+  | ChangeMetricsMessage
   | FileChangeMessage
   | ConversationStateMessage
   | ConversationSessionsMessage
@@ -126,6 +151,7 @@ export type ExtensionToWebviewMessage =
   | ConnectionResultMessage
   | ModelTestsResultMessage
   | McpInspectionResultMessage
+  | JiraCheckResultMessage
   | TasksStateMessage
   | TraceResetMessage
   | TraceEventMessage
@@ -152,9 +178,12 @@ export type WebviewToExtensionMessage =
   | { type: 'switchConversation'; conversationId: string }
   | { type: 'deleteConversation'; conversationId: string }
   | { type: 'clearConversation' }
+  | { type: 'refreshJiraProjects' }
+  | { type: 'selectJiraProject'; projectKey?: string }
   | { type: 'saveSettings'; data?: SettingsRequestPayload }
   | { type: 'testConnection'; data?: SettingsRequestPayload }
   | { type: 'testModels'; data?: SettingsRequestPayload }
+  | { type: 'checkJira'; data?: SettingsRequestPayload }
   | { type: 'inspectMcp'; data?: SettingsRequestPayload }
   | { type: 'refreshSuggestions' }
   | { type: 'acceptChange'; changeId: string }

@@ -25,6 +25,8 @@ export interface EditResultPresentation {
   cellIdx?: number;
   language?: string;
   stats?: {
+    added: number;
+    removed: number;
     beforeLines: number;
     afterLines: number;
     oldBytes: number;
@@ -122,6 +124,7 @@ function describeChangeType(changeType: EditPresentationChangeType): string {
 
 function describeEditStats(stats: NonNullable<EditResultPresentation['stats']>): string {
   const parts = [];
+  parts.push(`+${stats.added} / -${stats.removed}`);
   parts.push(`${stats.beforeLines} -> ${stats.afterLines} строк`);
   if (stats.changedLines > 0) {
     parts.push(`изменено ~${stats.changedLines} строк`);

@@ -7,6 +7,8 @@ import { AiChatViewProvider } from './ui/provider';
 import { AiOriginalContentProvider } from './ui/originalContentProvider';
 import { initMcpAuthStorage } from './agent/mcp/authStorage';
 
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+
 export function activate(context: vscode.ExtensionContext) {
   initConfigStorage(context.globalState);
   initMcpAuthStorage(context);

@@ -1,5 +1,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs/promises';
+import * as path from 'path';
+import { execFile } from 'child_process';
 import { readConfig, saveConfig } from '../core/api';
 import { EXTENSION_NAME } from '../core/constants';
 import type { ChatMessage } from '../core/types';
@@ -13,15 +15,20 @@ import { CheckpointStateStore } from './checkpointStateStore';
 import { WorkspaceChangeController, type WorkspaceChangeControllerState } from './changeController';
 import { ChangeStateStore } from './changeStateStore';
 import { ChatRunController } from './chatRunController';
-import { ConversationStore, type StoredConversationSession } from './conversations';
+import {
+  ConversationStore,
+  type ConversationSource,
+  type ConversationSummaryDto,
+  type StoredConversationSession,
+} from './conversations';
 import { AiOriginalContentProvider } from './originalContentProvider';
 import { ApprovalController } from './approvals';
 import { QuestionController } from './questions';
 import type { ExtensionToWebviewMessage, WebviewToExtensionMessage } from './protocol/messages';
+import type { JiraTaskContextViewState } from './protocol/conversations';
 import type { PersistedChatArtifact } from './protocol/artifacts';
 import {
   buildSkippedModelTests,
-  loadAvailableModels,
   normalizeSettingsPayload,
   runSelectedModelTests,
   testSettingsConnection,
@@ -29,7 +36,15 @@ import {
 } from './settingsModels';
 import { inspectMcpDraft } from './mcpInspector';
 import {
-  buildMissingChatModelIssueFromCatalog,
+  checkJiraSettings,
+  getSavedJiraTaskDetails,
+  listSavedJiraProjectTasks,
+  listSavedJiraProjects,
+  type JiraTaskDetails,
+  type JiraProjectOption,
+  type JiraTaskSummary,
+} from './jiraSettings';
+import {
   type SettingsModelIssue,
   type SettingsPanelRequest,
   type SettingsSectionId,
@@ -68,22 +83,45 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
   private pendingSettingsSection: SettingsSectionId | undefined;
   private pendingModelSelectionIssue: SettingsModelIssue | null = null;
   private highlightPendingModelSelectionIssue = false;
+  private settingsModelsLoadSeq = 0;
+  private selectedJiraProjectKey = '';
+  private jiraProjects: JiraProjectOption[] = [];
+  private jiraProjectTasks = new Map<string, JiraTaskSummary[]>();
+  private jiraAuthOk = false;
+  private jiraAuthUser = '';
+  private jiraError = '';
+  private jiraProjectsLoading = false;
+  private jiraTasksLoading = false;
+  private jiraTasksError = '';
+  private jiraRefreshSeq = 0;
+  private readonly jiraTaskContexts = new Map<string, JiraTaskContextSnapshot>();
+  private readonly jiraTaskContextLoads = new Map<string, Promise<JiraTaskContextSnapshot>>();
 
   constructor(
     private readonly context: vscode.ExtensionContext,
     originalProvider: AiOriginalContentProvider,
   ) {
     this.conversationStore = new ConversationStore(context.workspaceState);
+    this.selectedJiraProjectKey = normalizeJiraKey(context.workspaceState.get<string>('aiAssistant.selectedJiraProjectKey') || '');
     this.engineStore = new ConversationAgentEngineStore((conversationId, kind) => this.handleEngineRuntimeChanged(conversationId, kind));
     this.checkpointStateStore = new CheckpointStateStore(context);
     this.changeStateStore = new ChangeStateStore(context);
     const activeConversation = this.conversationStore.getActiveConversation();
     this.activeConversationId = activeConversation.id;
-    this.chatHistory.push(...activeConversation.messages);
-    this.chatArtifacts = Array.isArray(activeConversation.artifactEvents)
-      ? activeConversation.artifactEvents.map((artifact) => clonePersistedArtifact(artifact))
+    const initialMessages = activeConversation.source.type === 'jira'
+      ? filterGeneratedJiraContextChatMessages(activeConversation.messages, activeConversation.source.issueKey)
+      : activeConversation.messages;
+    const initialArtifacts = activeConversation.source.type === 'jira'
+      ? filterJiraContextStatusArtifacts(activeConversation.artifactEvents, activeConversation.source.issueKey)
+      : activeConversation.artifactEvents;
+    this.chatHistory.push(...initialMessages);
+    this.chatArtifacts = Array.isArray(initialArtifacts)
+      ? initialArtifacts.map((artifact) => clonePersistedArtifact(artifact))
       : [];
-    this.activeEngine = this.engineStore.getOrCreate(activeConversation.id, activeConversation.messages, activeConversation.agentRuntime);
+    if (initialMessages.length !== activeConversation.messages.length) {
+      void this.conversationStore.removeGeneratedJiraContextMessages(activeConversation.id);
+    }
+    this.activeEngine = this.engineStore.getOrCreate(activeConversation.id, initialMessages, activeConversation.agentRuntime);
     const appliedInitialWorktree = applyWorktreeSession(activeConversation.agentRuntime?.worktreeSession || null);
     if (!appliedInitialWorktree && activeConversation.agentRuntime?.worktreeSession) {
       this.activeEngine.setWorktreeSession(null);
@@ -128,6 +166,7 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
       checkpointController: this.checkpointController,
       changeController: this.changeController,
       getActiveFileContext: () => this.getActiveFileContext(),
+      getConversationContext: () => this.getActiveConversationContext(),
       post: (message) => this.post(message),
       requestApproval: (request, signal) => this.approvalController.request(request, signal),
       cancelApproval: (confirmId, reason) => this.approvalController.cancel(confirmId, reason),
@@ -251,6 +290,7 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
         this.sendConversationSessions();
         this.sendActiveConversationState(false);
         this.sendComposerPermissionsState();
+        void this.refreshJiraConversationProjects();
         await this.sendTasksState();
         return;
       case 'getConversationSessions':
@@ -271,6 +311,12 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
       case 'clearConversation':
         await this.handleClearConversation();
         return;
+      case 'refreshJiraProjects':
+        await this.refreshJiraConversationProjects({ force: true });
+        return;
+      case 'selectJiraProject':
+        await this.handleSelectJiraProject(message.projectKey || '');
+        return;
       case 'saveSettings':
         await this.handleSaveSettings(message.data || {});
         return;
@@ -282,6 +328,9 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'testModels':
         await this.handleTestModels(message.data || {});
+        return;
+      case 'checkJira':
+        await this.handleCheckJira(message.data || {});
         return;
       case 'inspectMcp':
         await this.handleInspectMcp(message.data || {});
@@ -406,11 +455,10 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
   private async sendSettings() {
     const config = readConfig();
     const mcp = await loadMcpSettingsEditorState();
-    const models = await loadAvailableModels(config);
-    const detectedModelIssue = buildMissingChatModelIssueFromCatalog(config, models);
-    const modelSelectionIssue = this.pendingModelSelectionIssue || detectedModelIssue;
+    const modelSelectionIssue = this.pendingModelSelectionIssue || null;
     const settingsSection = this.pendingSettingsSection || (modelSelectionIssue ? 'models' : undefined);
     const highlightModelSelectionIssue = this.highlightPendingModelSelectionIssue;
+    const modelsLoadSeq = ++this.settingsModelsLoadSeq;
     this.pendingSettingsSection = undefined;
     this.pendingModelSelectionIssue = null;
     this.highlightPendingModelSelectionIssue = false;
@@ -424,11 +472,25 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
         mcpSource: mcp.mcpSource,
         mcpSourceLabel: mcp.mcpSourceLabel,
         mcpLoadError: mcp.mcpLoadError,
-        models,
+        models: [],
         settingsSection,
         modelSelectionIssue,
         highlightModelSelectionIssue,
       },
+    });
+
+    if (config.apiBaseUrl && config.apiKey) {
+      void this.sendSettingsModels(config, modelsLoadSeq);
+    }
+  }
+
+  private async sendSettingsModels(config: SettingsPayload, seq: number): Promise<void> {
+    const result = await testSettingsConnection(config);
+    if (seq !== this.settingsModelsLoadSeq) return;
+    this.postSettings({
+      type: 'connectionResult',
+      silent: true,
+      ...result,
     });
   }
 
@@ -456,6 +518,9 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
         embeddingsModel: config.embeddingsModel,
         rerankModel: config.rerankModel,
         systemPrompt: config.systemPrompt,
+        jiraBaseUrl: config.jiraBaseUrl,
+        jiraUsername: config.jiraUsername,
+        jiraPassword: config.jiraPassword,
         mcpDisabledTools: config.mcpDisabledTools,
         mcpTrustedTools: config.mcpTrustedTools,
         webTrustedHosts: config.webTrustedHosts,
@@ -473,6 +538,7 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
           type: 'settingsSaved',
           ...(savedMcp.savedPath ? { mcpSavedPath: savedMcp.savedPath, mcpCreatedFile: savedMcp.created } : {}),
         });
+        void this.refreshJiraConversationProjects({ force: true });
         return;
       }
 
@@ -568,6 +634,13 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
+  private async handleCheckJira(data: SettingsPayload) {
+    this.postSettings({
+      type: 'jiraCheckResult',
+      ...(await checkJiraSettings(data)),
+    });
+  }
+
   private async handleInspectMcp(data: SettingsPayload) {
     try {
       const config = normalizeSettingsPayload(data);
@@ -623,10 +696,15 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private sendConversationSessions() {
+    const jiraMode = !!this.selectedJiraProjectKey;
     this.post({
       type: 'conversationSessions',
-      activeId: this.conversationStore.getActiveId(),
-      sessions: this.conversationStore.listSummaries(),
+      activeId: this.getSessionListActiveId(),
+      sessions: jiraMode
+        ? this.buildJiraConversationSummaries()
+        : this.conversationStore.listSummaries({ type: 'free' }),
+      mode: jiraMode ? 'jira' : 'free',
+      jira: this.buildJiraConversationScopeState(),
     });
   }
 
@@ -635,17 +713,25 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
     const runtime = this.activeEngine.snapshotRuntime();
     const config = readConfig();
     const pendingChangeIds = Array.from(this.changeController.getPendingChanges().keys());
+    const messages = active.source.type === 'jira'
+      ? filterGeneratedJiraContextChatMessages(active.messages, active.source.issueKey)
+      : active.messages;
+    const artifactEvents = active.source.type === 'jira'
+      ? filterJiraContextStatusArtifacts(active.artifactEvents, active.source.issueKey)
+      : active.artifactEvents;
     this.post({
       type: 'conversationState',
       sessionId: active.id,
       title: active.title,
+      source: active.source,
+      jiraContext: this.buildJiraContextView(active.source),
       replace,
-      messages: active.messages.map((message) => ({ role: message.role, content: message.content })),
+      messages: messages.map((message) => ({ role: message.role, content: message.content })),
       suggestions: active.suggestions,
       suggestionsState: active.suggestionsState,
       suggestionsSummary: active.suggestionsSummary,
       traceRuns: active.traceRuns,
-      artifactEvents: active.artifactEvents,
+      artifactEvents,
       agentMode: runtime.mode,
       awaitingPlanApproval: runtime.awaitingPlanApproval,
       pendingApproval: runtime.pendingApproval,
@@ -657,6 +743,134 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
       pendingChangeIds,
     });
     void this.sendTasksState();
+  }
+
+  private getSessionListActiveId(): string {
+    const active = this.conversationStore.getActiveConversation();
+    if (!this.selectedJiraProjectKey) {
+      return active.source.type === 'free' ? active.id : '';
+    }
+    return active.source.type === 'jira'
+      && normalizeJiraKey(active.source.projectKey) === this.selectedJiraProjectKey
+      ? active.id
+      : '';
+  }
+
+  private buildJiraConversationScopeState() {
+    const selectedProject = this.getSelectedJiraProject();
+    return {
+      selectedProjectKey: this.selectedJiraProjectKey,
+      selectedProjectName: selectedProject?.name || '',
+      authOk: this.jiraAuthOk,
+      authUser: this.jiraAuthUser,
+      error: this.jiraError,
+      projectsLoading: this.jiraProjectsLoading,
+      tasksLoading: this.jiraTasksLoading,
+      tasksError: this.jiraTasksError,
+      projects: this.jiraProjects.map((project) => ({ ...project })),
+    };
+  }
+
+  private buildJiraConversationSummaries(): ConversationSummaryDto[] {
+    const selectedProject = this.getSelectedJiraProject();
+    const tasks = this.jiraProjectTasks.get(this.selectedJiraProjectKey) || [];
+    return tasks.map((task) => {
+      const existing = this.conversationStore.findJiraConversation(task.key);
+      const source = this.buildJiraConversationSource(task, selectedProject);
+      return {
+        id: existing?.id || buildVirtualJiraConversationId(this.selectedJiraProjectKey, task.key),
+        title: `${task.key} • ${task.title || 'Задача Jira'}`,
+        source,
+        updatedAt: existing?.updatedAt || task.updatedAt || Date.now(),
+        messageCount: existing?.messages.length || 0,
+        preview: existing ? buildConversationPreview(existing.messages) : (task.description || task.url || 'Задача Jira'),
+        ...(existing ? {} : { virtual: true }),
+      };
+    });
+  }
+
+  private getSelectedJiraProject(): JiraProjectOption | null {
+    const key = this.selectedJiraProjectKey;
+    if (!key) return null;
+    return this.jiraProjects.find((project) => normalizeJiraKey(project.key) === key) || null;
+  }
+
+  private buildJiraConversationSource(task: JiraTaskSummary, project: JiraProjectOption | null): ConversationSource {
+    const projectKey = normalizeJiraKey(project?.key || this.selectedJiraProjectKey || task.key.split('-')[0]);
+    return {
+      type: 'jira',
+      projectKey,
+      projectName: project?.name || projectKey,
+      issueKey: normalizeJiraKey(task.key),
+      issueTitle: task.title || task.key,
+      issueUrl: task.url || '',
+      issueStatus: task.status || '',
+      issueDescription: task.description || '',
+    };
+  }
+
+  private buildJiraContextView(source: ConversationSource): JiraTaskContextViewState | null {
+    if (source.type !== 'jira') return null;
+    const key = normalizeJiraKey(source.issueKey);
+    const context = this.jiraTaskContexts.get(key) || null;
+    const loading = this.jiraTaskContextLoads.has(key);
+    const details = context?.details || null;
+    const meta = [
+      details?.type ? `Тип: ${details.type}` : '',
+      details?.priority ? `Приоритет: ${details.priority}` : '',
+      details?.resolution ? `Решение: ${details.resolution}` : '',
+      details?.assignee ? `Исполнитель: ${details.assignee}` : '',
+      details?.reporter ? `Автор: ${details.reporter}` : '',
+      details?.dueDate ? `Срок: ${details.dueDate}` : '',
+      details?.updated ? `Обновлена: ${details.updated}` : '',
+    ].filter(Boolean);
+
+    const commits = context ? buildJiraCommitViews(context.git, source.issueKey) : [];
+    return {
+      issueKey: source.issueKey,
+      title: context?.source.issueTitle || source.issueTitle,
+      project: `${context?.source.projectKey || source.projectKey}${(context?.source.projectName || source.projectName) ? ` • ${context?.source.projectName || source.projectName}` : ''}`,
+      status: context?.source.issueStatus || source.issueStatus,
+      url: context?.source.issueUrl || source.issueUrl,
+      description: context?.source.issueDescription || source.issueDescription,
+      updatedAt: context?.updatedAt || 0,
+      loading,
+      error: context?.detailError || context?.git.error || '',
+      meta,
+      sections: buildJiraContextViewSections(details),
+      repositoriesChecked: context?.git.repositories.length || 0,
+      commits,
+    };
+  }
+
+  private async getActiveConversationContext(): Promise<string> {
+    const active = this.conversationStore.getActiveConversation();
+    const source = active.source;
+    if (source.type !== 'jira') return '';
+    this.stripGeneratedJiraContextFromActiveHistory(source.issueKey);
+    this.stripJiraContextStatusArtifacts(source.issueKey);
+    const context = await this.getJiraTaskContext(active, { allowCached: true });
+    return buildJiraTaskExternalContext(context);
+  }
+
+  private stripGeneratedJiraContextFromActiveHistory(issueKey: string): void {
+    const nextHistory = this.chatHistory.filter((message) =>
+      !isGeneratedJiraContextChatMessage(message, issueKey),
+    );
+    if (nextHistory.length === this.chatHistory.length) return;
+    this.chatHistory.splice(0, this.chatHistory.length, ...nextHistory);
+    this.syncActiveConversationEngine();
+    void this.persistActiveConversation();
+  }
+
+  private stripJiraContextStatusArtifacts(issueKey: string): void {
+    const key = normalizeJiraKey(issueKey);
+    const nextArtifacts = this.chatArtifacts.filter((artifact) =>
+      !isGeneratedJiraContextStatusArtifact(artifact, key),
+    );
+    if (nextArtifacts.length === this.chatArtifacts.length) return;
+    this.chatArtifacts = nextArtifacts;
+    this.scheduleArtifactPersist();
   }
 
   private canSwitchConversation(): boolean {
@@ -677,20 +891,184 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
 
   private async handleCreateConversation() {
     if (!this.canSwitchConversation()) return;
+    if (this.selectedJiraProjectKey) {
+      this.post({ type: 'error', text: 'В Jira-проекте чат создаётся выбором задачи из списка. Чтобы создать обычный чат, выберите режим "Обычный чат".' });
+      return;
+    }
     await this.persistActiveConversation();
-    const created = await this.conversationStore.createConversation();
+    const created = await this.conversationStore.createConversation({ type: 'free' });
     this.activateConversation(created);
   }
 
   private async handleSwitchConversation(conversationId: string) {
     if (!this.canSwitchConversation()) return;
+    const virtualJira = parseVirtualJiraConversationId(conversationId);
+    if (virtualJira) {
+      await this.openJiraTaskConversation(virtualJira.issueKey);
+      return;
+    }
     await this.persistActiveConversation();
     const conversation = await this.conversationStore.switchConversation(conversationId);
     if (!conversation) {
       this.post({ type: 'error', text: 'Чат не найден.' });
       return;
     }
+    if (conversation.source.type === 'jira') {
+      const cleaned = await this.conversationStore.removeGeneratedJiraContextMessages(conversation.id);
+      const nextConversation = cleaned || conversation;
+      this.activateConversation(nextConversation);
+      if (nextConversation.source.type === 'jira') {
+        this.stripJiraContextStatusArtifacts(nextConversation.source.issueKey);
+      }
+      void this.refreshJiraTaskContext(nextConversation, { force: true });
+      return;
+    }
     this.activateConversation(conversation);
+  }
+
+  private async openJiraTaskConversation(issueKey: string) {
+    const key = normalizeJiraKey(issueKey);
+    if (!key) return;
+    await this.persistActiveConversation();
+    const existing = this.conversationStore.findJiraConversation(key);
+    if (existing) {
+      const cleaned = await this.conversationStore.removeGeneratedJiraContextMessages(existing.id);
+      const conversation = await this.conversationStore.switchConversation(cleaned?.id || existing.id);
+      if (conversation) {
+        this.activateConversation(conversation);
+        this.stripJiraContextStatusArtifacts(conversation.source.type === 'jira' ? conversation.source.issueKey : key);
+        void this.refreshJiraTaskContext(conversation, { force: true });
+      }
+      return;
+    }
+
+    const task = this.findCachedJiraTask(key);
+    if (!task) {
+      this.post({ type: 'error', text: `Задача Jira ${key} не найдена в текущем списке проекта.` });
+      return;
+    }
+    const created = await this.conversationStore.createConversation(this.buildJiraConversationSource(task, this.getSelectedJiraProject()));
+    this.activateConversation(created);
+    this.stripJiraContextStatusArtifacts(created.source.type === 'jira' ? created.source.issueKey : key);
+    void this.refreshJiraTaskContext(created, { force: true });
+  }
+
+  private async loadJiraTaskContext(source: Extract<ConversationSource, { type: 'jira' }>): Promise<{
+    source: Extract<ConversationSource, { type: 'jira' }>;
+    details: JiraTaskDetails | null;
+    error: string;
+  }> {
+    const result = await getSavedJiraTaskDetails(source.issueKey);
+    if (!result.ok || !result.task) {
+      return { source, details: null, error: result.error };
+    }
+
+    const task = result.task;
+    const nextSource: Extract<ConversationSource, { type: 'jira' }> = {
+      type: 'jira',
+      projectKey: normalizeJiraKey(task.projectKey || source.projectKey),
+      projectName: task.projectName || source.projectName,
+      issueKey: normalizeJiraKey(task.key || source.issueKey),
+      issueTitle: task.title || source.issueTitle,
+      issueUrl: task.url || source.issueUrl,
+      issueStatus: task.status || source.issueStatus,
+      issueDescription: task.description || source.issueDescription,
+    };
+    return { source: nextSource, details: task, error: '' };
+  }
+
+  private async getJiraTaskContext(
+    conversation: StoredConversationSession,
+    options: { allowCached?: boolean; force?: boolean } = {},
+  ): Promise<JiraTaskContextSnapshot> {
+    if (conversation.source.type !== 'jira') {
+      return buildFallbackJiraTaskContext({ type: 'jira', projectKey: '', projectName: '', issueKey: '', issueTitle: '', issueUrl: '', issueStatus: '', issueDescription: '' });
+    }
+
+    const key = normalizeJiraKey(conversation.source.issueKey);
+    const cached = this.jiraTaskContexts.get(key);
+    const cacheFresh = cached && Date.now() - cached.updatedAt < JIRA_TASK_CONTEXT_TTL_MS;
+    if (options.allowCached && cacheFresh && !options.force) {
+      return cached;
+    }
+
+    return await this.refreshJiraTaskContext(conversation, { force: options.force || !cached });
+  }
+
+  private async refreshJiraTaskContext(
+    conversation: StoredConversationSession,
+    options: { force?: boolean } = {},
+  ): Promise<JiraTaskContextSnapshot> {
+    if (conversation.source.type !== 'jira') {
+      return buildFallbackJiraTaskContext({ type: 'jira', projectKey: '', projectName: '', issueKey: '', issueTitle: '', issueUrl: '', issueStatus: '', issueDescription: '' });
+    }
+
+    const key = normalizeJiraKey(conversation.source.issueKey);
+    const cached = this.jiraTaskContexts.get(key);
+    const ageMs = cached ? Date.now() - cached.updatedAt : Number.POSITIVE_INFINITY;
+    if (cached && (!options.force || ageMs < JIRA_TASK_CONTEXT_FORCE_DEBOUNCE_MS) && ageMs < JIRA_TASK_CONTEXT_TTL_MS) {
+      return cached;
+    }
+
+    const existingLoad = this.jiraTaskContextLoads.get(key);
+    if (existingLoad) return await existingLoad;
+
+    const load = this.loadJiraTaskContextSnapshot(conversation.source);
+    this.jiraTaskContextLoads.set(key, load);
+    if (conversation.id === this.activeConversationId) {
+      this.sendActiveConversationState(false);
+    }
+    try {
+      const context = await load;
+      this.jiraTaskContexts.set(key, context);
+      const updated = await this.conversationStore.updateConversationSource(conversation.id, context.source);
+      if (updated && conversation.id === this.activeConversationId) {
+        this.sendConversationSessions();
+        this.sendActiveConversationState(false);
+      } else {
+        this.sendConversationSessions();
+      }
+      return context;
+    } finally {
+      this.jiraTaskContextLoads.delete(key);
+    }
+  }
+
+  private async loadJiraTaskContextSnapshot(source: Extract<ConversationSource, { type: 'jira' }>): Promise<JiraTaskContextSnapshot> {
+    try {
+      const taskContext = await this.loadJiraTaskContext(source);
+      const gitContext = await readIssueGitContext(taskContext.source.issueKey, this.getGitSearchRoots());
+      return {
+        source: taskContext.source,
+        details: taskContext.details,
+        detailError: taskContext.error,
+        git: gitContext,
+        updatedAt: Date.now(),
+      };
+    } catch (error: any) {
+      return {
+        source,
+        details: null,
+        detailError: formatJiraTaskContextError(error),
+        git: {
+          searchRoots: this.getGitSearchRoots(),
+          repositories: [],
+          error: formatJiraTaskContextError(error),
+        },
+        updatedAt: Date.now(),
+      };
+    }
+  }
+
+  private getGitSearchRoots(): string[] {
+    const roots = new Set<string>();
+    for (const folder of vscode.workspace.workspaceFolders || []) {
+      if (folder?.uri?.fsPath) {
+        roots.add(path.resolve(folder.uri.fsPath));
+      }
+    }
+    roots.add(path.resolve(this.getTasksRootPath()));
+    return [...roots].filter(Boolean);
   }
 
   private async handleClearConversation() {
@@ -705,6 +1083,10 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
 
   private async handleDeleteConversation(conversationId: string) {
     if (!conversationId) return;
+    if (parseVirtualJiraConversationId(conversationId)) {
+      this.post({ type: 'status', text: 'Задача Jira остаётся в списке. Истории чата для неё пока нет.' });
+      return;
+    }
     const deletingActive = conversationId === this.conversationStore.getActiveId();
     if (deletingActive && !this.canSwitchConversation()) return;
 
@@ -728,6 +1110,135 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
     this.sendConversationSessions();
   }
 
+  private async handleSelectJiraProject(projectKey: string) {
+    if (!this.canSwitchConversation()) return;
+    await this.persistActiveConversation();
+    const nextKey = normalizeJiraKey(projectKey);
+    this.selectedJiraProjectKey = nextKey;
+    this.jiraTasksError = '';
+    await this.context.workspaceState.update('aiAssistant.selectedJiraProjectKey', nextKey || undefined);
+
+    if (!nextKey) {
+      this.jiraTasksLoading = false;
+      await this.ensureFreeConversationActive();
+      this.sendConversationSessions();
+      return;
+    }
+
+    this.sendConversationSessions();
+    await this.refreshJiraConversationProjects({ force: false, openFirstTask: true });
+  }
+
+  private async ensureFreeConversationActive() {
+    const active = this.conversationStore.getActiveConversation();
+    if (active.source.type === 'free') {
+      this.activateConversation(active);
+      return;
+    }
+
+    const free = this.conversationStore.listSummaries({ type: 'free' })[0];
+    const next = free
+      ? await this.conversationStore.switchConversation(free.id)
+      : await this.conversationStore.createConversation({ type: 'free' });
+    if (next) {
+      this.activateConversation(next);
+    }
+  }
+
+  private async ensureJiraConversationActive(openFirstTask: boolean) {
+    if (!this.selectedJiraProjectKey) return;
+    const active = this.conversationStore.getActiveConversation();
+    if (
+      active.source.type === 'jira'
+      && normalizeJiraKey(active.source.projectKey) === this.selectedJiraProjectKey
+    ) {
+      const cleaned = await this.conversationStore.removeGeneratedJiraContextMessages(active.id);
+      const nextActive = cleaned || active;
+      this.activateConversation(nextActive);
+      if (nextActive.source.type === 'jira') {
+        this.stripJiraContextStatusArtifacts(nextActive.source.issueKey);
+      }
+      void this.refreshJiraTaskContext(nextActive, { force: false });
+      return;
+    }
+    if (!openFirstTask) return;
+    const firstTask = (this.jiraProjectTasks.get(this.selectedJiraProjectKey) || [])[0];
+    if (firstTask) {
+      await this.openJiraTaskConversation(firstTask.key);
+    }
+  }
+
+  private findCachedJiraTask(issueKey: string): JiraTaskSummary | null {
+    const key = normalizeJiraKey(issueKey);
+    for (const task of this.jiraProjectTasks.get(this.selectedJiraProjectKey) || []) {
+      if (normalizeJiraKey(task.key) === key) return task;
+    }
+    return null;
+  }
+
+  private async refreshJiraConversationProjects(options: { force?: boolean; openFirstTask?: boolean } = {}) {
+    if (this.jiraProjectsLoading && !options.force) return;
+    const seq = ++this.jiraRefreshSeq;
+    this.jiraProjectsLoading = true;
+    this.jiraError = '';
+    this.sendConversationSessions();
+
+    const result = await listSavedJiraProjects();
+    if (seq !== this.jiraRefreshSeq) return;
+
+    this.jiraProjectsLoading = false;
+    this.jiraAuthOk = result.ok;
+    this.jiraAuthUser = result.authUser || '';
+    this.jiraError = result.ok ? '' : result.error;
+    this.jiraProjects = result.projects || [];
+
+    if (this.selectedJiraProjectKey && !result.ok) {
+      this.selectedJiraProjectKey = '';
+      await this.context.workspaceState.update('aiAssistant.selectedJiraProjectKey', undefined);
+      await this.ensureFreeConversationActive();
+    }
+
+    if (this.selectedJiraProjectKey && !this.jiraProjects.some((project) => normalizeJiraKey(project.key) === this.selectedJiraProjectKey)) {
+      this.selectedJiraProjectKey = '';
+      await this.context.workspaceState.update('aiAssistant.selectedJiraProjectKey', undefined);
+      await this.ensureFreeConversationActive();
+    }
+
+    this.sendConversationSessions();
+    if (this.selectedJiraProjectKey && result.ok) {
+      await this.refreshSelectedJiraProjectTasks({ openFirstTask: !!options.openFirstTask });
+      return;
+    }
+
+    if (!this.selectedJiraProjectKey) {
+      this.jiraTasksLoading = false;
+      this.jiraTasksError = '';
+    }
+    this.sendConversationSessions();
+  }
+
+  private async refreshSelectedJiraProjectTasks(options: { openFirstTask?: boolean } = {}) {
+    const projectKey = this.selectedJiraProjectKey;
+    if (!projectKey) return;
+    this.jiraTasksLoading = true;
+    this.jiraTasksError = '';
+    this.sendConversationSessions();
+
+    const result = await listSavedJiraProjectTasks(projectKey, 100);
+    if (normalizeJiraKey(result.projectKey) !== this.selectedJiraProjectKey) return;
+
+    this.jiraTasksLoading = false;
+    this.jiraAuthOk = result.ok;
+    this.jiraAuthUser = result.authUser || this.jiraAuthUser;
+    this.jiraError = result.ok ? '' : result.error;
+    this.jiraTasksError = result.ok ? '' : result.error;
+    this.jiraProjectTasks.set(projectKey, result.tasks || []);
+    this.sendConversationSessions();
+    if (result.ok) {
+      await this.ensureJiraConversationActive(!!options.openFirstTask);
+    }
+  }
+
   private activateConversation(conversation: StoredConversationSession) {
     this.activeConversationId = conversation.id;
     this.activeEngine = this.engineStore.getOrCreate(conversation.id, conversation.messages, conversation.agentRuntime);
@@ -742,16 +1253,22 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
     }
     this.changeController.restoreState(changeState || null);
     this.chatHistory.splice(0, this.chatHistory.length, ...conversation.messages);
-    this.chatArtifacts = Array.isArray(conversation.artifactEvents)
-      ? conversation.artifactEvents.map((artifact) => clonePersistedArtifact(artifact))
+    const artifactEvents = conversation.source.type === 'jira'
+      ? filterJiraContextStatusArtifacts(conversation.artifactEvents, conversation.source.issueKey)
+      : conversation.artifactEvents;
+    this.chatArtifacts = Array.isArray(artifactEvents)
+      ? artifactEvents.map((artifact) => clonePersistedArtifact(artifact))
       : [];
+    if (artifactEvents.length !== conversation.artifactEvents.length) {
+      this.scheduleArtifactPersist();
+    }
     this.chatRunController.restoreConversationState({
       messages: conversation.messages,
       suggestions: conversation.suggestions,
       suggestionsState: conversation.suggestionsState,
       suggestionsSummary: conversation.suggestionsSummary,
       traceRuns: conversation.traceRuns,
-      artifactEvents: conversation.artifactEvents,
+      artifactEvents,
     });
     const checkpointState = this.checkpointStatesByConversation.get(conversation.id) || this.checkpointStateStore.read(conversation.id);
     if (checkpointState) {
@@ -875,8 +1392,25 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
     const artifact = toPersistedArtifact(message);
     if (!artifact) return;
     const runId = this.chatRunController.getActiveTraceRunId();
-    if (runId && !artifact.runId) {
+    if (runId && !artifact.runId && artifact.kind !== 'changeMetrics') {
       artifact.runId = runId;
+    }
+    if (artifact.kind === 'changeMetrics') {
+      const existingIndex = this.chatArtifacts.findIndex((item) =>
+        item.kind === 'changeMetrics',
+      );
+      const latestArtifact: PersistedChatArtifact = {
+        kind: 'changeMetrics',
+        payload: normalizeChangeMetricsPayload(artifact.payload),
+      };
+      if (existingIndex >= 0) {
+        this.chatArtifacts[existingIndex] = latestArtifact;
+        this.scheduleArtifactPersist();
+        return;
+      }
+      this.chatArtifacts.push(latestArtifact);
+      this.scheduleArtifactPersist();
+      return;
     }
     this.chatArtifacts.push(artifact);
     if (this.chatArtifacts.length > 240) {
@@ -982,6 +1516,706 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
   }
 }
 
+function normalizeJiraKey(value: unknown): string {
+  return String(value || '').trim().toUpperCase();
+}
+
+function buildVirtualJiraConversationId(projectKey: string, issueKey: string): string {
+  return `jira:${encodeURIComponent(normalizeJiraKey(projectKey))}:${encodeURIComponent(normalizeJiraKey(issueKey))}`;
+}
+
+function parseVirtualJiraConversationId(value: string): { projectKey: string; issueKey: string } | null {
+  const match = String(value || '').match(/^jira:([^:]+):([^:]+)$/);
+  if (!match) return null;
+  return {
+    projectKey: normalizeJiraKey(decodeURIComponent(match[1] || '')),
+    issueKey: normalizeJiraKey(decodeURIComponent(match[2] || '')),
+  };
+}
+
+function buildConversationPreview(messages: ChatMessage[]): string {
+  const last = [...(Array.isArray(messages) ? messages : [])].reverse().find((message) => message.content.trim());
+  if (!last) return 'История чата пока пуста.';
+  return last.content.replace(/\s+/g, ' ').trim().slice(0, 120);
+}
+
+function isGeneratedJiraContextChatMessage(message: ChatMessage, issueKey: string): boolean {
+  if (!message || message.role !== 'assistant') return false;
+  const key = normalizeJiraKey(issueKey);
+  const content = String(message.content || '').trim();
+  return content.startsWith(`Контекст Jira-задачи ${key}`)
+    && content.includes(`Git-контекст по ${key}:`);
+}
+
+function filterGeneratedJiraContextChatMessages(messages: ChatMessage[], issueKey: string): ChatMessage[] {
+  return (Array.isArray(messages) ? messages : []).filter((message) =>
+    !isGeneratedJiraContextChatMessage(message, issueKey),
+  );
+}
+
+function isGeneratedJiraContextStatusArtifact(artifact: PersistedChatArtifact, issueKey: string): boolean {
+  if (!artifact || artifact.kind !== 'statusMessage') return false;
+  const key = normalizeJiraKey(issueKey);
+  const text = String(artifact.payload?.text || '').trim();
+  return text === `Обновляю контекст задачи ${key}...`;
+}
+
+function filterJiraContextStatusArtifacts(artifacts: PersistedChatArtifact[], issueKey: string): PersistedChatArtifact[] {
+  return (Array.isArray(artifacts) ? artifacts : []).filter((artifact) =>
+    !isGeneratedJiraContextStatusArtifact(artifact, issueKey),
+  );
+}
+
+type JiraConversationSource = Extract<ConversationSource, { type: 'jira' }>;
+
+const JIRA_TASK_CONTEXT_TTL_MS = 2 * 60 * 1000;
+const JIRA_TASK_CONTEXT_FORCE_DEBOUNCE_MS = 15 * 1000;
+
+interface JiraTaskContextSnapshot {
+  source: JiraConversationSource;
+  details: JiraTaskDetails | null;
+  detailError: string;
+  git: IssueGitContext;
+  updatedAt: number;
+}
+
+interface GitBranchRef {
+  name: string;
+  type: 'local' | 'remote';
+}
+
+interface IssueCommitMatch {
+  hash: string;
+  shortHash: string;
+  date: string;
+  author: string;
+  subject: string;
+  branches: GitBranchRef[];
+}
+
+interface IssueRepositoryGitContext {
+  rootPath: string;
+  currentBranch: string;
+  commits: IssueCommitMatch[];
+  error: string;
+}
+
+interface IssueGitContext {
+  searchRoots: string[];
+  repositories: IssueRepositoryGitContext[];
+  error: string;
+}
+
+function buildJiraTaskExternalContext(context: JiraTaskContextSnapshot): string {
+  return [
+    'Текущий чат привязан к Jira-задаче. Этот блок является скрытым обновляемым контекстом, а не сообщением из истории чата.',
+    'Если пользователь говорит "эта задача", "текущая задача" или "тикет", речь о задаче ниже.',
+    'Важно: Jira-задача описывает цель, но ответ по реализации должен опираться на текущую кодовую базу workspace.',
+    'Если пользователь просит изучить, спроектировать или реализовать текущую задачу, сначала проверь существующую реализацию через поиск/чтение файлов. Не предлагай создавать Jira-клиент, настройки, tools или chat-интеграцию, пока не проверил, что они действительно отсутствуют.',
+    'Для Jira-задач особенно проверяй существующие места по словам: Jira, jiraBaseUrl, jiraSettings, jira_get_task, jira_search_tasks, ConversationSource, project tasks, task context.',
+    'В итоговом ответе не заявляй "отсутствует" или "нужно создать", если это не подтверждено прочитанными файлами текущего запуска; лучше называй конкретные файлы, которые уже есть и что в них надо менять.',
+    `Контекст обновлён: ${new Date(context.updatedAt).toISOString()}`,
+    '',
+    buildJiraInitialContextMessage(context.source, context.details, context.detailError, context.git),
+    '',
+    `Для свежих данных по этой задаче используй jira_get_task с key="${context.source.issueKey}". Для задач текущего проекта используй jira_search_tasks с project="${context.source.projectKey}".`,
+  ].filter(Boolean).join('\n');
+}
+
+function buildFallbackJiraTaskContext(source: JiraConversationSource): JiraTaskContextSnapshot {
+  return {
+    source,
+    details: null,
+    detailError: '',
+    git: {
+      searchRoots: [],
+      repositories: [],
+      error: '',
+    },
+    updatedAt: Date.now(),
+  };
+}
+
+function buildJiraCommitViews(git: IssueGitContext, issueKey: string): JiraTaskContextViewState['commits'] {
+  const output: JiraTaskContextViewState['commits'] = [];
+  for (const repo of git.repositories) {
+    for (const commit of repo.commits) {
+      const branchWithCommit = chooseBranchWithCommit([commit], repo.currentBranch);
+      const currentHasCommit = repo.currentBranch
+        ? commit.branches.some((branch) => branchMatchesCurrent(branch.name, repo.currentBranch))
+        : false;
+      const suggestion = branchWithCommit && !currentHasCommit
+        ? `Переключиться: ${buildSwitchCommand(branchWithCommit)} или создать: git switch -c ${buildIssueBranchName(issueKey)}`
+        : currentHasCommit
+          ? 'Текущая ветка уже содержит этот коммит.'
+          : `Создать ветку: git switch -c ${buildIssueBranchName(issueKey)}`;
+      output.push({
+        repository: repo.rootPath,
+        currentBranch: repo.currentBranch,
+        hash: commit.hash,
+        shortHash: commit.shortHash,
+        date: commit.date,
+        author: commit.author,
+        subject: commit.subject,
+        branches: commit.branches.map(formatBranchRef),
+        suggestion,
+      });
+    }
+  }
+  return output.slice(0, 20);
+}
+
+function buildJiraContextViewSections(details: JiraTaskDetails | null): JiraTaskContextViewState['sections'] {
+  if (!details) return [];
+  const sections: JiraTaskContextViewState['sections'] = [];
+  const addSection = (title: string, items: string[]): void => {
+    const visible = items.filter(Boolean);
+    if (!visible.length) return;
+    sections.push({ title, items: visible });
+  };
+
+  addSection('Связи', [
+    details.epic ? `Эпик: ${formatJiraLinkedIssueViewLine(details.epic)}` : '',
+    details.parent ? `Родительская: ${formatJiraLinkedIssueViewLine(details.parent)}` : '',
+    ...details.subtasks.map((issue) => `Подзадача: ${formatJiraLinkedIssueViewLine(issue)}`),
+    ...details.issueLinks.map((link) => `${link.direction || link.type || 'Связь'}: ${formatJiraLinkedIssueViewLine(link.issue)}`),
+  ]);
+  addSection('Комментарии', buildJiraCommentPreviewItems(details));
+  addSection('Вложения', details.attachments.map((attachment) => [
+    attachment.filename,
+    attachment.size,
+    attachment.author ? `автор: ${attachment.author}` : '',
+    attachment.created,
+  ].filter(Boolean).join(' • ')));
+  addSection('Поля Jira', [
+    details.environment ? `Environment: ${limitText(details.environment, 180)}` : '',
+    details.affectedVersions.length ? `Affected versions: ${details.affectedVersions.join(', ')}` : '',
+    ...details.customFields.map(formatJiraCustomFieldViewLine),
+  ]);
+  addSection('Предупреждения', details.warnings);
+  return sections;
+}
+
+function buildJiraCommentPreviewItems(details: JiraTaskDetails): string[] {
+  if (!details.comments.length) {
+    return details.commentsTotal ? [`Комментарии есть (${details.commentsTotal}), но их не удалось загрузить.`] : [];
+  }
+  const items = details.comments.map((comment) => [
+    [comment.author || 'n/a', comment.updated || comment.created].filter(Boolean).join(' • '),
+    limitText(comment.body || 'без текста', 260),
+  ].filter(Boolean).join(': '));
+  if (details.commentsTotal > details.comments.length) {
+    items.unshift(`Загружено ${details.comments.length} из ${details.commentsTotal}`);
+  }
+  return items;
+}
+
+function formatJiraLinkedIssueViewLine(issue: {
+  key: string;
+  title: string;
+  description?: string;
+  status: string;
+  type: string;
+}): string {
+  const headline = [
+    issue.key,
+    issue.title && issue.title !== issue.key ? issue.title : '',
+    issue.status,
+    issue.type,
+  ].filter(Boolean).join(' • ');
+  const description = limitText(issue.description || '', 320);
+  return description ? `${headline}\nОписание: ${description}` : headline;
+}
+
+function formatJiraCustomFieldViewLine(field: { name: string; value: string }): string {
+  const name = field.name || 'Поле Jira';
+  const value = String(field.value || '').trim();
+  if (!value) return '';
+  if (isNoisyJiraViewField(name, value)) {
+    return `${name}: данные доступны в Jira`;
+  }
+  return `${name}: ${limitText(value, 180)}`;
+}
+
+function isNoisyJiraViewField(name: string, value: string): boolean {
+  const text = `${name}\n${value}`;
+  return /com\.atlassian\.jira\.plugin\.devstatus|SummaryBean@|SummaryItemBean@|OverallBean@|\{summaryBean=/i.test(text);
+}
+
+function formatJiraTaskContextError(error: any): string {
+  return error?.message || error?.cause?.message || String(error || 'Не удалось сформировать контекст задачи.');
+}
+
+function buildJiraInitialContextMessage(
+  source: JiraConversationSource,
+  details: JiraTaskDetails | null,
+  detailError: string,
+  git: IssueGitContext,
+): string {
+  const labels = details?.labels?.length ? details.labels.join(', ') : '';
+  const components = details?.components?.length ? details.components.join(', ') : '';
+  const fixVersions = details?.fixVersions?.length ? details.fixVersions.join(', ') : '';
+  const lines = [
+    `Контекст Jira-задачи ${source.issueKey}`,
+    '',
+    `Проект: ${source.projectKey}${source.projectName ? ` • ${source.projectName}` : ''}`,
+    `Задача: ${source.issueKey} • ${source.issueTitle}`,
+    source.issueStatus ? `Статус: ${source.issueStatus}` : '',
+    details?.type ? `Тип: ${details.type}` : '',
+    details?.priority ? `Приоритет: ${details.priority}` : '',
+    details?.assignee ? `Исполнитель: ${details.assignee}` : '',
+    details?.reporter ? `Автор: ${details.reporter}` : '',
+    details?.created ? `Создана: ${details.created}` : '',
+    details?.updated ? `Обновлена: ${details.updated}` : '',
+    details?.resolution ? `Решение: ${details.resolution}` : '',
+    details?.dueDate ? `Срок: ${details.dueDate}` : '',
+    labels ? `Labels: ${labels}` : '',
+    components ? `Components: ${components}` : '',
+    fixVersions ? `Fix versions: ${fixVersions}` : '',
+    source.issueUrl ? `URL: ${source.issueUrl}` : '',
+    detailError ? `Детали Jira не удалось обновить: ${detailError}` : '',
+    '',
+    'Описание:',
+    source.issueDescription || 'Описание в Jira не заполнено.',
+    '',
+    buildJiraTaskDetailsExtraContext(details),
+    '',
+    buildIssueGitContextText(source.issueKey, git),
+    '',
+    `Дальше считаем этот чат рабочим контекстом задачи ${source.issueKey}.`,
+  ];
+  return lines.filter((line, index, all) => line || all[index - 1] !== '').join('\n').trim();
+}
+
+function buildJiraTaskDetailsExtraContext(details: JiraTaskDetails | null): string {
+  if (!details) return '';
+  const blocks = [
+    buildJiraLinkedIssuesContext(details),
+    buildJiraCommentsContext(details),
+    buildJiraAttachmentsContext(details),
+    buildJiraCustomFieldsContext(details),
+    details.warnings.length ? ['Предупреждения Jira:', ...details.warnings.map((warning) => `- ${warning}`)].join('\n') : '',
+  ].filter(Boolean);
+  return blocks.join('\n\n');
+}
+
+function buildJiraLinkedIssuesContext(details: JiraTaskDetails): string {
+  const lines = ['Связи Jira:'];
+  if (details.epic) lines.push(`- Эпик: ${formatJiraLinkedIssueLine(details.epic)}`);
+  if (details.parent) lines.push(`- Родительская задача: ${formatJiraLinkedIssueLine(details.parent)}`);
+  for (const issue of details.subtasks) {
+    lines.push(`- Подзадача: ${formatJiraLinkedIssueLine(issue)}`);
+  }
+  for (const link of details.issueLinks) {
+    lines.push(`- ${link.direction || link.type || 'Связь'}: ${formatJiraLinkedIssueLine(link.issue)}`);
+  }
+  return lines.length > 1 ? lines.join('\n') : '';
+}
+
+function buildJiraCommentsContext(details: JiraTaskDetails): string {
+  if (!details.comments.length) {
+    return details.commentsTotal ? `Комментарии Jira: есть ${details.commentsTotal}, но текст не загружен.` : '';
+  }
+  const lines = [`Комментарии Jira (${details.comments.length}${details.commentsTotal > details.comments.length ? ` из ${details.commentsTotal}` : ''}):`];
+  for (const comment of details.comments) {
+    const header = `- ${comment.author || 'n/a'} • ${comment.updated || comment.created || 'без даты'}`;
+    const body = indentText(limitText(comment.body || 'без текста', 3_000), '  ');
+    lines.push(`${header}\n${body}`);
+  }
+  return lines.join('\n');
+}
+
+function buildJiraAttachmentsContext(details: JiraTaskDetails): string {
+  if (!details.attachments.length) return '';
+  const lines = ['Вложения Jira:'];
+  for (const attachment of details.attachments) {
+    lines.push(`- ${[
+      attachment.filename,
+      attachment.size,
+      attachment.mimeType,
+      attachment.author ? `автор: ${attachment.author}` : '',
+      attachment.created,
+    ].filter(Boolean).join(' • ')}`);
+  }
+  return lines.join('\n');
+}
+
+function buildJiraCustomFieldsContext(details: JiraTaskDetails): string {
+  const lines = ['Дополнительные поля Jira:'];
+  if (details.environment) lines.push(`- Environment: ${limitText(details.environment, 2_000)}`);
+  if (details.affectedVersions.length) lines.push(`- Affected versions: ${details.affectedVersions.join(', ')}`);
+  for (const field of details.customFields) {
+    lines.push(`- ${field.name} (${field.id}): ${limitText(field.value, 2_000)}`);
+  }
+  return lines.length > 1 ? lines.join('\n') : '';
+}
+
+function formatJiraLinkedIssueLine(issue: {
+  key: string;
+  title: string;
+  description?: string;
+  status: string;
+  type: string;
+  url: string;
+}): string {
+  return [
+    issue.key,
+    issue.title && issue.title !== issue.key ? issue.title : '',
+    issue.status ? `статус: ${issue.status}` : '',
+    issue.type ? `тип: ${issue.type}` : '',
+    issue.description ? `описание: ${limitText(issue.description, 1_200)}` : '',
+    issue.url,
+  ].filter(Boolean).join(' • ');
+}
+
+function limitText(value: string, maxLength: number): string {
+  const text = String(value || '').trim();
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+}
+
+function indentText(value: string, prefix: string): string {
+  return String(value || '').split('\n').map((line) => `${prefix}${line}`).join('\n');
+}
+
+function buildIssueGitContextText(issueKey: string, git: IssueGitContext): string {
+  const lines = [
+    `Git-контекст по ${issueKey}:`,
+    git.searchRoots.length ? `Папки поиска: ${git.searchRoots.join(', ')}` : '',
+  ].filter(Boolean);
+
+  if (git.error) {
+    lines.push(`Проверка репозиториев: ${git.error}`);
+  }
+
+  if (git.repositories.length === 0) {
+    const newBranch = buildIssueBranchName(issueKey);
+    lines.push('Git-репозитории в открытых папках не найдены.');
+    lines.push(`Когда выберешь нужный репозиторий, можно создать рабочую ветку: git switch -c ${newBranch}`);
+    return lines.join('\n');
+  }
+
+  const repositoriesWithCommits = git.repositories.filter((repo) => repo.commits.length > 0);
+  if (repositoriesWithCommits.length === 0) {
+    const newBranch = buildIssueBranchName(issueKey);
+    lines.push(`Проверено репозиториев: ${git.repositories.length}. Коммиты с ключом ${issueKey} не найдены.`);
+    lines.push(`В нужном репозитории можно создать рабочую ветку: git switch -c ${newBranch}`);
+    return lines.join('\n');
+  }
+
+  lines.push(`Проверено репозиториев: ${git.repositories.length}. Найдены коммиты в ${repositoriesWithCommits.length}.`);
+  for (const repo of repositoriesWithCommits) {
+    lines.push('');
+    lines.push(`Репозиторий: ${repo.rootPath}`);
+    if (repo.currentBranch) {
+      lines.push(`Текущая ветка: ${repo.currentBranch}`);
+    }
+    if (repo.error) {
+      lines.push(`Проверка коммитов: ${repo.error}`);
+      continue;
+    }
+    lines.push('Коммиты:');
+    for (const commit of repo.commits) {
+      const branches = commit.branches.length
+        ? commit.branches.map(formatBranchRef).join(', ')
+        : 'ветка не найдена';
+      lines.push(`- ${commit.shortHash} • ${commit.date || 'без даты'} • ${commit.author || 'unknown'} • ${commit.subject}`);
+      lines.push(`  Ветки: ${branches}`);
+    }
+
+    const branchWithCommit = chooseBranchWithCommit(repo.commits, repo.currentBranch);
+    const currentHasCommit = repo.currentBranch
+      ? repo.commits.some((commit) => commit.branches.some((branch) => branchMatchesCurrent(branch.name, repo.currentBranch)))
+      : false;
+    if (branchWithCommit && !currentHasCommit) {
+      const newBranch = buildIssueBranchName(issueKey);
+      lines.push('Текущая ветка этого репозитория отличается от ветки с найденным коммитом.');
+      lines.push(`Можно переключиться: ${buildSwitchCommand(branchWithCommit)}.`);
+      lines.push(`Либо создать новую рабочую ветку: git switch -c ${newBranch}.`);
+    } else if (currentHasCommit) {
+      lines.push('Текущая ветка этого репозитория уже содержит найденный коммит по задаче.');
+    }
+  }
+
+  const repositoriesWithErrors = git.repositories.filter((repo) => repo.error && repo.commits.length === 0);
+  if (repositoriesWithErrors.length) {
+    lines.push('');
+    lines.push('Репозитории с ошибками проверки:');
+    for (const repo of repositoriesWithErrors.slice(0, 5)) {
+      lines.push(`- ${repo.rootPath}: ${repo.error}`);
+    }
+  }
+
+  return lines.join('\n');
+}
+
+async function readIssueGitContext(issueKey: string, searchRoots: string[]): Promise<IssueGitContext> {
+  const normalizedSearchRoots = normalizeUniquePaths(searchRoots);
+  const discovery = await discoverGitRepositories(normalizedSearchRoots);
+  const repositories: IssueRepositoryGitContext[] = [];
+
+  for (const repoRoot of discovery.repositories) {
+    repositories.push(await readRepositoryIssueGitContext(issueKey, repoRoot));
+  }
+
+  return {
+    searchRoots: normalizedSearchRoots,
+    repositories,
+    error: discovery.error,
+  };
+}
+
+async function readRepositoryIssueGitContext(issueKey: string, rootPath: string): Promise<IssueRepositoryGitContext> {
+  const currentBranch = await readCurrentGitBranch(rootPath);
+  const log = await runGit([
+    'log',
+    '--all',
+    '--regexp-ignore-case',
+    `--grep=${issueKey}`,
+    '--max-count=10',
+    '--date=short',
+    '--pretty=format:%H%x1f%h%x1f%ad%x1f%an%x1f%s',
+  ], rootPath);
+
+  if (!log.ok) {
+    return {
+      rootPath,
+      currentBranch,
+      commits: [],
+      error: formatGitError(log, 'не удалось прочитать историю git'),
+    };
+  }
+
+  const commits = parseIssueCommitLog(log.stdout);
+  for (const commit of commits) {
+    commit.branches = await readCommitBranches(rootPath, commit.hash);
+  }
+  return { rootPath, currentBranch, commits, error: '' };
+}
+
+const MAX_GIT_REPOSITORIES = 40;
+const MAX_GIT_SCAN_DEPTH = 10;
+const MAX_GIT_SCAN_DIRECTORIES = 6_000;
+
+async function discoverGitRepositories(searchRoots: string[]): Promise<{ repositories: string[]; error: string }> {
+  const repositories: string[] = [];
+  const seen = new Set<string>();
+  const warnings: string[] = [];
+  let scannedDirectories = 0;
+
+  const addRepository = async (candidate: string): Promise<void> => {
+    if (repositories.length >= MAX_GIT_REPOSITORIES) return;
+    const result = await runGit(['rev-parse', '--show-toplevel'], candidate);
+    if (!result.ok) return;
+    const root = normalizePath(firstLine(result.stdout));
+    if (!root || seen.has(root)) return;
+    seen.add(root);
+    repositories.push(root);
+  };
+
+  for (const root of searchRoots) {
+    await addRepository(root);
+  }
+
+  const scanDirectory = async (directory: string, depth: number): Promise<void> => {
+    if (repositories.length >= MAX_GIT_REPOSITORIES) return;
+    if (scannedDirectories >= MAX_GIT_SCAN_DIRECTORIES) return;
+    scannedDirectories += 1;
+
+    if (await pathExists(path.join(directory, '.git'))) {
+      await addRepository(directory);
+    }
+    if (depth >= MAX_GIT_SCAN_DEPTH) return;
+
+    let entries: import('fs').Dirent[];
+    try {
+      entries = await fs.readdir(directory, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      if (repositories.length >= MAX_GIT_REPOSITORIES) return;
+      if (scannedDirectories >= MAX_GIT_SCAN_DIRECTORIES) return;
+      if (!entry.isDirectory() || shouldSkipGitScanDirectory(entry.name)) continue;
+      await scanDirectory(path.join(directory, entry.name), depth + 1);
+    }
+  };
+
+  for (const root of searchRoots) {
+    await scanDirectory(root, 0);
+  }
+
+  if (repositories.length >= MAX_GIT_REPOSITORIES) {
+    warnings.push(`найдены первые ${MAX_GIT_REPOSITORIES} репозиториев, остальные не проверялись`);
+  }
+  if (scannedDirectories >= MAX_GIT_SCAN_DIRECTORIES) {
+    warnings.push(`сканирование остановлено после ${MAX_GIT_SCAN_DIRECTORIES} директорий`);
+  }
+
+  return {
+    repositories,
+    error: warnings.join('; '),
+  };
+}
+
+function shouldSkipGitScanDirectory(name: string): boolean {
+  return new Set([
+    '.git',
+    '.hg',
+    '.svn',
+    '.cache',
+    '.next',
+    '.turbo',
+    '.vscode',
+    'node_modules',
+    'dist',
+    'out',
+    'build',
+    'coverage',
+    'target',
+  ]).has(name);
+}
+
+async function readCurrentGitBranch(cwd: string): Promise<string> {
+  const branch = await runGit(['branch', '--show-current'], cwd);
+  const name = firstLine(branch.stdout);
+  if (name) return name;
+  const head = await runGit(['rev-parse', '--short', 'HEAD'], cwd);
+  const shortHead = firstLine(head.stdout);
+  return shortHead ? `detached HEAD ${shortHead}` : '';
+}
+
+async function readCommitBranches(cwd: string, hash: string): Promise<GitBranchRef[]> {
+  const result = await runGit([
+    'for-each-ref',
+    '--contains',
+    hash,
+    '--format=%(refname)%09%(refname:short)',
+    'refs/heads',
+    'refs/remotes',
+  ], cwd);
+  if (!result.ok) return [];
+  const seen = new Set<string>();
+  const branches: GitBranchRef[] = [];
+  for (const line of result.stdout.split(/\r?\n/)) {
+    const [refName, shortName] = line.split('\t');
+    const name = String(shortName || '').trim();
+    if (!name || /\/HEAD$/.test(String(refName || '')) || /\/HEAD$/.test(name) || seen.has(name)) continue;
+    const type = String(refName || '').startsWith('refs/remotes/') ? 'remote' : 'local';
+    seen.add(name);
+    branches.push({ name, type });
+  }
+  return branches.sort((left, right) => {
+    if (left.type !== right.type) return left.type === 'local' ? -1 : 1;
+    return left.name.localeCompare(right.name);
+  });
+}
+
+function parseIssueCommitLog(stdout: string): IssueCommitMatch[] {
+  return String(stdout || '')
+    .split(/\r?\n/)
+    .map((line) => {
+      const [hash, shortHash, date, author, subject] = line.split('\x1f');
+      return {
+        hash: String(hash || '').trim(),
+        shortHash: String(shortHash || '').trim(),
+        date: String(date || '').trim(),
+        author: String(author || '').trim(),
+        subject: String(subject || '').trim(),
+        branches: [],
+      };
+    })
+    .filter((commit) => commit.hash && commit.shortHash && commit.subject);
+}
+
+function chooseBranchWithCommit(commits: IssueCommitMatch[], currentBranch: string): GitBranchRef | null {
+  const branches = commits.flatMap((commit) => commit.branches);
+  if (currentBranch) {
+    const current = branches.find((branch) => branchMatchesCurrent(branch.name, currentBranch));
+    if (current) return current;
+  }
+  return branches.find((branch) => branch.type === 'local') || branches[0] || null;
+}
+
+function branchMatchesCurrent(branchName: string, currentBranch: string): boolean {
+  const branch = String(branchName || '').trim();
+  const current = String(currentBranch || '').trim();
+  return !!branch && !!current && (branch === current || branch.endsWith(`/${current}`));
+}
+
+function formatBranchRef(branch: GitBranchRef): string {
+  return branch.type === 'remote' ? `${branch.name} (remote)` : branch.name;
+}
+
+function buildSwitchCommand(branch: GitBranchRef): string {
+  return branch.type === 'remote'
+    ? `git switch --track ${branch.name}`
+    : `git switch ${branch.name}`;
+}
+
+function buildIssueBranchName(issueKey: string): string {
+  const slug = String(issueKey || 'jira-task')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '') || 'jira-task';
+  return `codex/${slug}`;
+}
+
+function runGit(args: string[], cwd: string): Promise<{ ok: boolean; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    execFile('git', args, {
+      cwd,
+      timeout: 8_000,
+      maxBuffer: 1024 * 1024,
+    }, (error, stdout, stderr) => {
+      resolve({
+        ok: !error,
+        stdout: String(stdout || ''),
+        stderr: String(stderr || ''),
+      });
+    });
+  });
+}
+
+function normalizeUniquePaths(values: string[]): string[] {
+  const seen = new Set<string>();
+  const output: string[] = [];
+  for (const value of values) {
+    const normalized = normalizePath(value);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    output.push(normalized);
+  }
+  return output;
+}
+
+function normalizePath(value: string): string {
+  try {
+    return path.resolve(String(value || '').trim());
+  } catch {
+    return String(value || '').trim();
+  }
+}
+
+async function pathExists(value: string): Promise<boolean> {
+  try {
+    await fs.lstat(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function firstLine(value: string): string {
+  return String(value || '').split(/\r?\n/).map((line) => line.trim()).find(Boolean) || '';
+}
+
+function formatGitError(result: { stderr: string; stdout: string }, fallback: string): string {
+  return firstLine(result.stderr) || firstLine(result.stdout) || fallback;
+}
+
 function toPersistedArtifact(message: ExtensionToWebviewMessage): PersistedChatArtifact | null {
   if (message.type === 'status') {
     return { kind: 'statusMessage', payload: { text: sanitizeArtifactPayload(message.text) as string } };
@@ -1006,6 +2240,23 @@ function toPersistedArtifact(message: ExtensionToWebviewMessage): PersistedChatA
         newSnippet: message.newSnippet,
         cellIdx: message.cellIdx,
         diffLines: Array.isArray(message.diffLines) ? message.diffLines.map((line) => ({ ...line })) : [],
+      },
+    };
+  }
+
+  if (message.type === 'changeMetrics') {
+    return {
+      kind: 'changeMetrics',
+      payload: {
+        pendingFiles: Number(message.metrics?.pendingFiles || 0),
+        pendingChanges: Number(message.metrics?.pendingChanges || 0),
+        agentLines: Number(message.metrics?.agentLines || 0),
+        agentModifiedByUserLines: Number(message.metrics?.agentModifiedByUserLines || 0),
+        agentRemovedLines: Number(message.metrics?.agentRemovedLines || 0),
+        agentDeletedByUserLines: Number(message.metrics?.agentDeletedByUserLines || 0),
+        userOnlyLines: Number(message.metrics?.userOnlyLines || 0),
+        userRemovedLines: Number(message.metrics?.userRemovedLines || 0),
+        unknownFiles: Number(message.metrics?.unknownFiles || 0),
       },
     };
   }
@@ -1068,6 +2319,21 @@ function clonePersistedArtifact(artifact: PersistedChatArtifact): PersistedChatA
   };
 }
 
+function normalizeChangeMetricsPayload(next: any) {
+  const numberValue = (key: string) => Math.max(0, Number(next?.[key] || 0));
+  return {
+    pendingFiles: numberValue('pendingFiles'),
+    pendingChanges: numberValue('pendingChanges'),
+    agentLines: numberValue('agentLines'),
+    agentModifiedByUserLines: numberValue('agentModifiedByUserLines'),
+    agentRemovedLines: numberValue('agentRemovedLines'),
+    agentDeletedByUserLines: numberValue('agentDeletedByUserLines'),
+    userOnlyLines: numberValue('userOnlyLines'),
+    userRemovedLines: numberValue('userRemovedLines'),
+    unknownFiles: numberValue('unknownFiles'),
+  };
+}
+
 function sanitizeArtifactPayload(value: any): any {
   if (value === null || value === undefined) return value;
   if (typeof value === 'string') return value.slice(0, 4000);
@@ -1092,6 +2358,7 @@ function shouldPersistCheckpointState(message: ExtensionToWebviewMessage): boole
 
 function shouldPersistChangeState(message: ExtensionToWebviewMessage): boolean {
   return message.type === 'fileChange'
+    || message.type === 'changeMetrics'
     || message.type === 'changeAccepted'
     || message.type === 'changeRejected'
     || message.type === 'checkpointReverted'

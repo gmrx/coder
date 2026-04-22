@@ -45,6 +45,11 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.composer-tools-row .chat-session-metrics {
+  flex: 2 1 280px;
+  min-width: 180px;
+  padding: 0;
+}
 @media (max-width: 520px) {
   .composer-tools-row {
     align-items: flex-start;
@@ -53,6 +58,10 @@
   }
   .composer-tools-row .chat-context-usage {
     width: 100%;
+  }
+  .composer-tools-row .chat-session-metrics {
+    width: 100%;
+    min-width: 0;
   }
 }
 .composer-permissions-panel {

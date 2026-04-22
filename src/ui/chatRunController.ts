@@ -27,6 +27,7 @@ interface ChatRunControllerOptions {
   checkpointController: CheckpointController;
   changeController: WorkspaceChangeController;
   getActiveFileContext: () => { path: string; language: string; content: string } | null;
+  getConversationContext?: () => string | Promise<string>;
   post: WebviewMessageSink;
   requestApproval: (request: AgentApprovalRequest, signal?: AbortSignal) => Promise<AgentApprovalResult>;
   cancelApproval: (confirmId: string, reason?: string) => void;
@@ -124,6 +125,13 @@ export class ChatRunController {
       this.options.post({ type: 'agentDone' });
       return;
     }
+    this.options.post({
+      type: 'traceEvent',
+      phase: 'agent-model',
+      text: config.model ? `Модель: ${config.model}` : '',
+      data: { model: config.model },
+    });
+    this.recordTraceEvent('agent-model', config.model ? `Модель: ${config.model}` : '', { model: config.model });
 
     const checkpoint = await this.options.checkpointController.createCheckpoint(text);
     this.options.post({
@@ -149,6 +157,7 @@ export class ChatRunController {
         {
           question: text,
           activeFile: this.options.getActiveFileContext(),
+          externalContext: await this.options.getConversationContext?.() || '',
         },
         {
           onStep: (phase, message, meta): void | Promise<any> => {
@@ -378,6 +387,7 @@ export class ChatRunController {
       type: 'conversationState',
       sessionId: '',
       title: '',
+      source: { type: 'free' },
       ...this.snapshotConversationState(),
       agentMode: runtime.mode,
       awaitingPlanApproval: runtime.awaitingPlanApproval,

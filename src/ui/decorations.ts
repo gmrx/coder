@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { computeEditorDiff } from './diff';
 import { guessLanguage } from './language';
+import { classifyLineAttribution } from './lineProvenance';
 import type { FileSnapshot, PendingChangeSnapshot } from './state';
 
 interface EditorDecorationControllerOptions {
@@ -11,6 +12,8 @@ interface EditorDecorationControllerOptions {
 
 export class EditorDecorationController {
   private readonly addedDeco: vscode.TextEditorDecorationType;
+  private readonly agentModifiedByUserDeco: vscode.TextEditorDecorationType;
+  private readonly userOnlyDeco: vscode.TextEditorDecorationType;
   private readonly removedDeco: vscode.TextEditorDecorationType;
   private readonly removedDecoTop: vscode.TextEditorDecorationType;
   private decoTimer: ReturnType<typeof setTimeout> | undefined;
@@ -20,6 +23,18 @@ export class EditorDecorationController {
       isWholeLine: true,
       backgroundColor: 'rgba(35, 134, 54, 0.18)',
       overviewRulerColor: 'rgba(35, 134, 54, 0.6)',
+      overviewRulerLane: vscode.OverviewRulerLane.Left,
+    });
+    this.agentModifiedByUserDeco = vscode.window.createTextEditorDecorationType({
+      isWholeLine: true,
+      backgroundColor: 'rgba(234, 179, 8, 0.22)',
+      overviewRulerColor: 'rgba(234, 179, 8, 0.75)',
+      overviewRulerLane: vscode.OverviewRulerLane.Left,
+    });
+    this.userOnlyDeco = vscode.window.createTextEditorDecorationType({
+      isWholeLine: true,
+      backgroundColor: 'rgba(34, 211, 238, 0.16)',
+      overviewRulerColor: 'rgba(34, 211, 238, 0.7)',
       overviewRulerLane: vscode.OverviewRulerLane.Left,
     });
     this.removedDeco = vscode.window.createTextEditorDecorationType({
@@ -35,6 +50,8 @@ export class EditorDecorationController {
 
     options.context.subscriptions.push(
       this.addedDeco,
+      this.agentModifiedByUserDeco,
+      this.userOnlyDeco,
       this.removedDeco,
       this.removedDecoTop,
       vscode.window.onDidChangeActiveTextEditor((editor) => {
@@ -67,26 +84,43 @@ export class EditorDecorationController {
     const filePath = vscode.workspace.asRelativePath(editor.document.uri, false);
     const hasPending = Array.from(this.options.getPendingChanges().values()).some((change) => change.filePath === filePath);
     if (!hasPending) {
-      editor.setDecorations(this.addedDeco, []);
-      editor.setDecorations(this.removedDeco, []);
-      editor.setDecorations(this.removedDecoTop, []);
+      this.clearDecorations(editor);
       return;
     }
 
     const originalState = this.options.getOriginalFileStates().get(filePath);
     if (!originalState) {
-      editor.setDecorations(this.addedDeco, []);
-      editor.setDecorations(this.removedDeco, []);
-      editor.setDecorations(this.removedDecoTop, []);
+      this.clearDecorations(editor);
       return;
     }
 
-    const diff = computeEditorDiff(originalState.content, editor.document.getText());
-    const addedRanges: vscode.DecorationOptions[] = diff.addedLines
+    const currentText = editor.document.getText();
+    const classified = classifyLineAttribution(
+      originalState.content,
+      Array.from(this.options.getPendingChanges().values()).filter((change) => change.filePath === filePath),
+      currentText,
+    );
+    const diff = computeEditorDiff(originalState.content, currentText);
+
+    const addedRanges: vscode.DecorationOptions[] = [...classified.agentLines]
       .filter((lineNumber) => lineNumber < editor.document.lineCount)
-      .map((lineNumber) => ({
-        range: new vscode.Range(lineNumber, 0, lineNumber, editor.document.lineAt(lineNumber).text.length),
-      }));
+      .map((lineNumber) => buildLineDecoration(editor, lineNumber, 'Строка добавлена или изменена агентом.'));
+
+    const agentModifiedByUserRanges: vscode.DecorationOptions[] = [...classified.agentModifiedByUserLines]
+      .filter((lineNumber) => lineNumber < editor.document.lineCount)
+      .map((lineNumber) => buildLineDecoration(
+        editor,
+        lineNumber,
+        'Строка была добавлена или изменена агентом, но после этого пользователь изменил её вручную.',
+      ));
+
+    const userOnlyRanges: vscode.DecorationOptions[] = [...classified.userOnlyLines]
+      .filter((lineNumber) => lineNumber < editor.document.lineCount)
+      .map((lineNumber) => buildLineDecoration(
+        editor,
+        lineNumber,
+        'Строка изменена пользователем вне участка, который менял агент.',
+      ));
 
     const removedRanges: vscode.DecorationOptions[] = [];
     const removedTopRanges: vscode.DecorationOptions[] = [];
@@ -123,9 +157,28 @@ export class EditorDecorationController {
     }
 
     editor.setDecorations(this.addedDeco, addedRanges);
+    editor.setDecorations(this.agentModifiedByUserDeco, agentModifiedByUserRanges);
+    editor.setDecorations(this.userOnlyDeco, userOnlyRanges);
     editor.setDecorations(this.removedDeco, removedRanges);
     editor.setDecorations(this.removedDecoTop, removedTopRanges);
   }
+
+  private clearDecorations(editor: vscode.TextEditor) {
+    editor.setDecorations(this.addedDeco, []);
+    editor.setDecorations(this.agentModifiedByUserDeco, []);
+    editor.setDecorations(this.userOnlyDeco, []);
+    editor.setDecorations(this.removedDeco, []);
+    editor.setDecorations(this.removedDecoTop, []);
+  }
+}
+
+function buildLineDecoration(editor: vscode.TextEditor, lineNumber: number, hoverText: string): vscode.DecorationOptions {
+  const hover = new vscode.MarkdownString();
+  hover.appendMarkdown(hoverText);
+  return {
+    range: new vscode.Range(lineNumber, 0, lineNumber, editor.document.lineAt(lineNumber).text.length),
+    hoverMessage: hover,
+  };
 }
 
 function formatRemovedRegion(lines: string[]): string {

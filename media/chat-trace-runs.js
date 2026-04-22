@@ -22,6 +22,28 @@
     return String(left).localeCompare(String(right));
   }
 
+  function compactMetricNumber(value) {
+    var number = Math.max(0, Number(value || 0));
+    if (number >= 1000000) return Math.round(number / 100000) / 10 + 'M';
+    if (number >= 1000) return Math.round(number / 100) / 10 + 'k';
+    return String(number);
+  }
+
+  function shortModelName(model) {
+    var value = String(model || '').trim();
+    if (!value) return '';
+    var slash = value.lastIndexOf('/');
+    if (slash >= 0 && slash < value.length - 1) value = value.slice(slash + 1);
+    return value.length > 28 ? value.slice(0, 25) + '...' : value;
+  }
+
+  function setMetric(el, text, visible, title) {
+    if (!el) return;
+    el.textContent = visible ? text : '';
+    el.title = visible ? (title || text) : '';
+    el.classList.toggle('hidden', !visible);
+  }
+
   function setRunCollapsed(run, collapsed) {
     if (!run) return;
     run.el.classList.toggle('is-collapsed', collapsed);
@@ -39,6 +61,21 @@
     var orphanError = 0;
     var autoCount = Object.keys(run.autoTools).length;
     var now = run.finishedAt || Date.now();
+    var lineStats = run.lineStats || {};
+    var changeMetrics = run.changeMetrics || {};
+    var agentAdded = Math.max(0, Number(lineStats.added || 0));
+    var agentRemoved = Math.max(0, Number(lineStats.removed || 0));
+    var agentModifiedByUser = Math.max(0, Number(changeMetrics.agentModifiedByUserLines || 0));
+    var agentDeletedByUser = Math.max(0, Number(changeMetrics.agentDeletedByUserLines || 0));
+    var userOnly = Math.max(0, Number(changeMetrics.userOnlyLines || 0));
+    var userRemoved = Math.max(0, Number(changeMetrics.userRemovedLines || 0));
+    var toolErrors = Math.max(0, Number(run.errorCount || 0));
+    var model = String(run.model || (run.modelUsage && run.modelUsage.model) || '');
+    var modelUsage = run.modelUsage || {};
+    var promptTokens = Math.max(0, Number(modelUsage.promptTokens || 0));
+    var completionTokens = Math.max(0, Number(modelUsage.completionTokens || 0));
+    var totalTokens = Math.max(0, Number(modelUsage.totalTokens || 0));
+    var modelCalls = Math.max(0, Number(modelUsage.calls || 0));
 
     for (var index = 0; index < subagentIds.length; index++) {
       var subagent = run.subagents[subagentIds[index]];
@@ -54,6 +91,49 @@
     run.metrics.tools.textContent = run.toolCount + ' инструментов';
     run.metrics.subagents.textContent = subTotal + ' подагентов';
     run.metrics.duration.textContent = shared.formatDuration(now - run.startedAt);
+    setMetric(run.metrics.model, 'модель: ' + shortModelName(model), !!model, model ? 'Модель: ' + model : '');
+    setMetric(
+      run.metrics.tokens,
+      totalTokens > 0
+        ? 'токены: ' + compactMetricNumber(promptTokens) + ' in + ' + compactMetricNumber(completionTokens) + ' out'
+        : modelCalls > 0
+          ? 'LLM вызовов: ' + compactMetricNumber(modelCalls)
+        : '',
+      totalTokens > 0 || promptTokens > 0 || completionTokens > 0 || modelCalls > 0,
+      totalTokens > 0
+        ? 'Использование API: ' + compactMetricNumber(promptTokens) + ' input + ' + compactMetricNumber(completionTokens) + ' output = ' + compactMetricNumber(totalTokens) + (modelCalls > 0 ? '\nВызовов модели: ' + compactMetricNumber(modelCalls) : '')
+        : modelCalls > 0
+          ? 'Вызовов модели: ' + compactMetricNumber(modelCalls)
+        : ''
+    );
+    setMetric(
+      run.metrics.lines,
+      '+' + agentAdded + ' / -' + agentRemoved + ' строк',
+      agentAdded > 0 || agentRemoved > 0,
+      'Строки, изменённые агентом: добавлено ' + agentAdded + ', удалено ' + agentRemoved
+    );
+    setMetric(
+      run.metrics.userEdits,
+      'пользователь: ' + (agentModifiedByUser + agentDeletedByUser) + ' по агенту • ' + (userOnly + userRemoved) + ' своих',
+      agentModifiedByUser > 0 || agentDeletedByUser > 0 || userOnly > 0 || userRemoved > 0,
+      [
+        'Строки агента, изменённые пользователем: ' + agentModifiedByUser,
+        'Строки агента, удалённые пользователем: ' + agentDeletedByUser,
+        'Строки, изменённые пользователем вне правок агента: ' + userOnly,
+        'Строки, удалённые пользователем вне правок агента: ' + userRemoved
+      ].join('\n')
+    );
+    setMetric(
+      run.metrics.errors,
+      'ошибок утилит: ' + toolErrors,
+      toolErrors > 0,
+      'Ошибки выполнения инструментов/утилит агента: ' + toolErrors
+    );
+    run.el.dataset.agentAdded = String(agentAdded);
+    run.el.dataset.agentRemoved = String(agentRemoved);
+    run.el.dataset.agentUserEdited = String(agentModifiedByUser + agentDeletedByUser);
+    run.el.dataset.userOnlyEdited = String(userOnly + userRemoved);
+    run.el.dataset.toolErrors = String(toolErrors);
 
     run.autoSection.el.classList.toggle('hidden', autoCount === 0);
     run.subagentsSection.el.classList.toggle('hidden', orphanTotal === 0);
@@ -132,6 +212,10 @@
 
     var metrics = document.createElement('div');
     metrics.className = 'trace-run-metrics';
+    var metricModel = document.createElement('span');
+    metricModel.className = 'trace-metric is-model hidden';
+    var metricTokens = document.createElement('span');
+    metricTokens.className = 'trace-metric is-tokens hidden';
     var metricSteps = document.createElement('span');
     metricSteps.className = 'trace-metric';
     var metricTools = document.createElement('span');
@@ -140,10 +224,21 @@
     metricSubagents.className = 'trace-metric';
     var metricDuration = document.createElement('span');
     metricDuration.className = 'trace-metric';
+    var metricLines = document.createElement('span');
+    metricLines.className = 'trace-metric is-lines hidden';
+    var metricUserEdits = document.createElement('span');
+    metricUserEdits.className = 'trace-metric is-user-edits hidden';
+    var metricErrors = document.createElement('span');
+    metricErrors.className = 'trace-metric is-errors hidden';
+    metrics.appendChild(metricModel);
+    metrics.appendChild(metricTokens);
     metrics.appendChild(metricSteps);
     metrics.appendChild(metricTools);
     metrics.appendChild(metricSubagents);
     metrics.appendChild(metricDuration);
+    metrics.appendChild(metricLines);
+    metrics.appendChild(metricUserEdits);
+    metrics.appendChild(metricErrors);
     info.appendChild(metrics);
 
     var toggle = document.createElement('button');
@@ -191,6 +286,13 @@
       startedAt: Date.now(),
       finishedAt: 0,
       toolCount: 0,
+      errorCount: 0,
+      lineStats: { added: 0, removed: 0 },
+      changeMetrics: null,
+      model: '',
+      modelUsage: null,
+      countedFileChanges: {},
+      countedToolErrors: {},
       el: el,
       bodyEl: body,
       toggleEl: toggle,
@@ -205,10 +307,15 @@
       notesSection: notesSection,
       notesEl: notesList,
       metrics: {
+        model: metricModel,
+        tokens: metricTokens,
         steps: metricSteps,
         tools: metricTools,
         subagents: metricSubagents,
         duration: metricDuration,
+        lines: metricLines,
+        userEdits: metricUserEdits,
+        errors: metricErrors,
       },
       steps: {},
       sequenceCards: {},
@@ -761,6 +868,112 @@
     return chip;
   }
 
+  function recordFileChange(run, msg) {
+    if (!run || !msg) return;
+    var key = String(msg.changeId || msg.filePath || '') || ('change-' + Object.keys(run.countedFileChanges || {}).length);
+    run.countedFileChanges = run.countedFileChanges || {};
+    if (run.countedFileChanges[key]) return;
+    run.countedFileChanges[key] = true;
+
+    var stats = msg.stats || {};
+    run.lineStats = run.lineStats || { added: 0, removed: 0 };
+    run.lineStats.added += Math.max(0, Number(stats.added || 0));
+    run.lineStats.removed += Math.max(0, Number(stats.removed || 0));
+    updateRunStats(run);
+  }
+
+  function updateChangeMetrics(run, metrics) {
+    if (!run || !metrics) return;
+    if (
+      run.changeMetrics &&
+      Math.max(0, Number(metrics.pendingFiles || 0)) === 0 &&
+      Math.max(0, Number(metrics.pendingChanges || 0)) === 0
+    ) {
+      return;
+    }
+    run.changeMetrics = {
+      pendingFiles: Math.max(0, Number(metrics.pendingFiles || 0)),
+      pendingChanges: Math.max(0, Number(metrics.pendingChanges || 0)),
+      agentLines: Math.max(0, Number(metrics.agentLines || 0)),
+      agentModifiedByUserLines: Math.max(0, Number(metrics.agentModifiedByUserLines || 0)),
+      agentRemovedLines: Math.max(0, Number(metrics.agentRemovedLines || 0)),
+      agentDeletedByUserLines: Math.max(0, Number(metrics.agentDeletedByUserLines || 0)),
+      userOnlyLines: Math.max(0, Number(metrics.userOnlyLines || 0)),
+      userRemovedLines: Math.max(0, Number(metrics.userRemovedLines || 0)),
+      unknownFiles: Math.max(0, Number(metrics.unknownFiles || 0))
+    };
+    if (!run.lineStats || (!run.lineStats.added && !run.lineStats.removed)) {
+      run.lineStats = run.lineStats || { added: 0, removed: 0 };
+      run.lineStats.removed = Math.max(run.lineStats.removed || 0, run.changeMetrics.agentRemovedLines || 0);
+    }
+    updateRunStats(run);
+  }
+
+  function updateModelUsage(run, context) {
+    if (!run || !context) return;
+    var model = context.model ? String(context.model) : '';
+    if (run.modelUsage && Number(run.modelUsage.calls || 0) > 0) {
+      if (model) run.model = model;
+      updateRunStats(run);
+      return;
+    }
+    var promptTokens = Math.max(0, Number(context.lastPromptTokens || 0));
+    var completionTokens = Math.max(0, Number(context.lastCompletionTokens || 0));
+    var totalTokens = Math.max(0, Number(context.lastTotalTokens || 0));
+    var estimatedInputTokens = Math.max(0, Number(context.estimatedInputTokens || 0));
+    if (model) run.model = model;
+    run.modelUsage = {
+      model: model || run.model || '',
+      promptTokens: promptTokens,
+      completionTokens: completionTokens,
+      totalTokens: totalTokens,
+      estimatedInputTokens: estimatedInputTokens
+    };
+    updateRunStats(run);
+  }
+
+  function recordModelUsage(run, usage) {
+    if (!run || !usage) return;
+    var model = usage.model ? String(usage.model) : '';
+    var promptTokens = Math.max(0, Number(
+      usage.promptTokens !== undefined ? usage.promptTokens : usage.lastPromptTokens || 0
+    ));
+    var completionTokens = Math.max(0, Number(
+      usage.completionTokens !== undefined ? usage.completionTokens : usage.lastCompletionTokens || 0
+    ));
+    var totalTokens = Math.max(0, Number(
+      usage.totalTokens !== undefined ? usage.totalTokens : usage.lastTotalTokens || 0
+    ));
+    if (!totalTokens && (promptTokens || completionTokens)) {
+      totalTokens = promptTokens + completionTokens;
+    }
+    if (model) run.model = model;
+    run.modelUsage = run.modelUsage || {
+      model: model || run.model || '',
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+      estimatedInputTokens: 0,
+      calls: 0
+    };
+    run.modelUsage.model = model || run.modelUsage.model || run.model || '';
+    run.modelUsage.promptTokens = Math.max(0, Number(run.modelUsage.promptTokens || 0)) + promptTokens;
+    run.modelUsage.completionTokens = Math.max(0, Number(run.modelUsage.completionTokens || 0)) + completionTokens;
+    run.modelUsage.totalTokens = Math.max(0, Number(run.modelUsage.totalTokens || 0)) + totalTokens;
+    run.modelUsage.calls = Math.max(0, Number(run.modelUsage.calls || 0)) + 1;
+    updateRunStats(run);
+  }
+
+  function recordToolError(run, key) {
+    if (!run) return;
+    var errorKey = String(key || '') || ('error-' + (Number(run.errorCount || 0) + 1));
+    run.countedToolErrors = run.countedToolErrors || {};
+    if (run.countedToolErrors[errorKey]) return;
+    run.countedToolErrors[errorKey] = true;
+    run.errorCount = Math.max(0, Number(run.errorCount || 0)) + 1;
+    updateRunStats(run);
+  }
+
   window.ChatTraceRuns = {
     setRunCollapsed: setRunCollapsed,
     updateRunStats: updateRunStats,
@@ -779,5 +992,10 @@
     updateStepChild: updateStepChild,
     appendRunNote: appendRunNote,
     ensureAutoChip: ensureAutoChip,
+    recordFileChange: recordFileChange,
+    updateChangeMetrics: updateChangeMetrics,
+    updateModelUsage: updateModelUsage,
+    recordModelUsage: recordModelUsage,
+    recordToolError: recordToolError,
   };
 })();

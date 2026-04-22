@@ -74,6 +74,9 @@ export function readConfig(): AssistantConfig {
     mcpTrustedTools: normalizeMcpTrustedTools(fallback.get<unknown>('mcpTrustedTools') || storedTrustedMcpTools || []),
     webTrustedHosts: normalizeHostList(fallback.get<unknown>('webTrustedHosts') || storedTrustedHosts || []),
     webBlockedHosts: normalizeHostList(fallback.get<unknown>('webBlockedHosts') || storedBlockedHosts || []),
+    jiraBaseUrl: _state?.get<string>('jiraBaseUrl') || fallback.get<string>('jiraBaseUrl') || '',
+    jiraUsername: _state?.get<string>('jiraUsername') || fallback.get<string>('jiraUsername') || '',
+    jiraPassword: _state?.get<string>('jiraPassword') || fallback.get<string>('jiraPassword') || '',
     autoApproval: normalizeAutoApproval(configuredAutoApproval || storedAutoApproval || DEFAULT_AUTO_APPROVAL),
   };
 }
@@ -85,6 +88,9 @@ export async function saveConfig(data: Partial<AssistantConfig>): Promise<void> 
   if (data.model !== undefined) await _state.update('model', data.model || undefined);
   if (data.embeddingsModel !== undefined) await _state.update('embeddingsModel', data.embeddingsModel || undefined);
   if (data.rerankModel !== undefined) await _state.update('rerankModel', data.rerankModel || undefined);
+  if (data.jiraBaseUrl !== undefined) await _state.update('jiraBaseUrl', data.jiraBaseUrl || undefined);
+  if (data.jiraUsername !== undefined) await _state.update('jiraUsername', data.jiraUsername || undefined);
+  if (data.jiraPassword !== undefined) await _state.update('jiraPassword', data.jiraPassword || undefined);
   if (data.systemPrompt !== undefined) {
     const config = vscode.workspace.getConfiguration('aiAssistant');
     const target = vscode.workspace.workspaceFolders?.length

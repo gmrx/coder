@@ -85,6 +85,14 @@
   background: rgba(34, 211, 238, 0.12);
   color: var(--vscode-terminal-ansiCyan, #22d3ee);
 }
+.approval-chip.is-add {
+  background: rgba(34, 197, 94, 0.12);
+  color: var(--vscode-terminal-ansiGreen, #22c55e);
+}
+.approval-chip.is-del {
+  background: rgba(239, 68, 68, 0.12);
+  color: var(--vscode-terminal-ansiRed, #ef4444);
+}
 .approval-chip.is-lines,
 .approval-chip.is-bytes,
 .approval-chip.is-delta {

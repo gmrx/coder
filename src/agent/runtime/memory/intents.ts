@@ -19,7 +19,12 @@ export function isPlanningIntentQuery(query: string): boolean {
 
 export function isMcpTopicContext(text: string): boolean {
   const value = normalizeQuery(text);
-  return /(hubthe|mcp\b|mcp_|mcp-|mcp tool|mcp tools|mcp сервер|mcp вызов|remote tool|server=|current_project|project_guid|list_projects|list_my_tasks|list_sprints|search_tasks|projects|tasks|participants|участник|участники|исполнител|проекты|задач|спринт|guid=|email=|name=)/.test(value);
+  return /(hubthe|mcp\b|mcp_|mcp-|mcp tool|mcp tools|mcp сервер|mcp вызов|remote tool|server=|current_project|project_guid|list_projects|list_my_tasks|list_sprints|search_tasks|guid=|email=|name=)/.test(value);
+}
+
+export function isJiraTopicQuery(query: string): boolean {
+  const value = normalizeQuery(query);
+  return /(jira|джир|жир[аеуы]?|какие у меня задачи|мои задачи|задачи в jira|задачи jira|jira tasks)/.test(value);
 }
 
 export function isCorrectionQuery(query: string): boolean {

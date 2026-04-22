@@ -437,6 +437,80 @@
   line-height: 1.5;
   color: var(--vscode-descriptionForeground, rgba(255, 255, 255, 0.72));
 }
+.jira-project-list {
+  display: grid;
+  gap: 8px;
+}
+.jira-project-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--vscode-panel-border, rgba(255, 255, 255, 0.1));
+  background: rgba(255, 255, 255, 0.025);
+}
+.jira-project-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+}
+.jira-project-title {
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.jira-project-meta {
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground, rgba(255, 255, 255, 0.72));
+}
+.jira-project-count {
+  font-size: 12px;
+  font-weight: 600;
+}
+.jira-task-list {
+  border-top: 1px solid var(--vscode-panel-border, rgba(255, 255, 255, 0.08));
+}
+.jira-task-row {
+  padding: 8px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.jira-task-row + .jira-task-row {
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+.jira-task-title {
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.jira-task-description {
+  max-height: 160px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--vscode-foreground);
+}
+.jira-task-description.is-empty,
+.jira-task-empty,
+.jira-task-url {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--vscode-descriptionForeground, rgba(255, 255, 255, 0.68));
+}
+.jira-task-url {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .settings-help {
   border: 1px dashed rgba(255, 255, 255, 0.12);
   border-radius: var(--radius);

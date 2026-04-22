@@ -97,13 +97,22 @@
 }
 .app-shell-header {
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 8px;
   padding: 10px 12px;
   border-bottom: 1px solid var(--vscode-panel-border, var(--vscode-editorGroup-border));
   background: var(--vscode-sideBarSectionHeader-background, rgba(255, 255, 255, 0.03));
   flex-shrink: 0;
+}
+.app-shell-header-row {
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 .app-shell-chat-heading {
   min-width: 0;
@@ -207,6 +216,184 @@
 .chat-sidebar-footer {
   padding-top: 8px;
   border-top: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.08));
+}
+.jira-chat-scope {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.jira-chat-scope-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+}
+.jira-chat-project-select {
+  min-width: 0;
+  width: 100%;
+  height: 26px;
+  padding: 3px 7px;
+  border-radius: 6px;
+  border: 1px solid var(--vscode-input-border, var(--vscode-panel-border, rgba(255,255,255,0.14)));
+  background: var(--vscode-dropdown-background, var(--vscode-input-background));
+  color: var(--vscode-dropdown-foreground, var(--vscode-input-foreground));
+  font-size: 10.5px;
+}
+.jira-chat-project-select.is-native-hidden {
+  display: none;
+}
+.jira-project-picker-trigger {
+  min-width: 0;
+  width: 100%;
+  height: 26px;
+  padding: 3px 24px 3px 7px;
+  border-radius: 6px;
+  border: 1px solid var(--vscode-input-border, var(--vscode-panel-border, rgba(255,255,255,0.14)));
+  background: var(--vscode-dropdown-background, var(--vscode-input-background));
+  color: var(--vscode-dropdown-foreground, var(--vscode-input-foreground));
+  font-size: 10.5px;
+  line-height: 1;
+  text-align: left;
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+}
+.jira-project-picker-trigger:focus {
+  outline: none;
+  border-color: var(--vscode-focusBorder, #007acc);
+}
+.jira-project-picker-trigger:disabled {
+  cursor: default;
+  opacity: 0.62;
+}
+.jira-project-picker-trigger.placeholder {
+  color: var(--vscode-input-placeholderForeground, rgba(255,255,255,0.45));
+}
+.jira-project-picker-text {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.jira-project-picker-arrow {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 8px;
+  opacity: 0.55;
+  pointer-events: none;
+}
+.jira-project-dropdown {
+  display: none;
+  position: fixed;
+  overflow-y: auto;
+  background: var(--vscode-dropdown-background, var(--vscode-input-background));
+  border: 1px solid var(--vscode-dropdown-border, var(--vscode-focusBorder, #007acc));
+  border-radius: 6px;
+  z-index: 9999;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.4);
+}
+.jira-project-dropdown.open {
+  display: block;
+}
+.jira-project-dropdown-search {
+  width: 100%;
+  padding: 7px 9px;
+  border: none;
+  border-bottom: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.1));
+  background: var(--vscode-dropdown-background, var(--vscode-input-background));
+  color: var(--vscode-input-foreground);
+  font-size: 11px;
+  outline: none;
+  position: sticky;
+  top: 0;
+}
+.jira-project-option {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  padding: 6px 9px;
+  cursor: pointer;
+  font-size: 11px;
+  transition: background 0.08s;
+}
+.jira-project-option:hover {
+  background: var(--vscode-list-hoverBackground, rgba(255,255,255,0.06));
+}
+.jira-project-option.selected {
+  background: var(--vscode-list-activeSelectionBackground, #094771);
+  color: var(--vscode-list-activeSelectionForeground, #fff);
+}
+.jira-project-option.none-option {
+  opacity: 0.72;
+  font-style: italic;
+}
+.jira-project-option-key {
+  flex-shrink: 0;
+  font-weight: 700;
+  font-family: var(--vscode-editor-font-family, monospace);
+}
+.jira-project-option-name {
+  min-width: 0;
+  color: inherit;
+  opacity: 0.82;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.jira-project-dropdown-empty {
+  padding: 10px;
+  opacity: 0.55;
+  font-size: 10.5px;
+  text-align: center;
+}
+.jira-chat-refresh {
+  width: 28px;
+  min-width: 28px;
+  padding-left: 0;
+  padding-right: 0;
+}
+.jira-chat-scope-status {
+  font-size: 9.5px;
+  line-height: 1.35;
+  color: var(--vscode-descriptionForeground, rgba(255,255,255,0.66));
+  overflow-wrap: anywhere;
+}
+.jira-chat-scope-status.is-ok {
+  color: #3fb950;
+}
+.jira-chat-scope-status.is-error {
+  color: var(--vscode-errorForeground, #f48771);
+}
+.jira-task-search {
+  display: flex;
+  padding-top: 2px;
+}
+.jira-task-search.hidden {
+  display: none;
+}
+.jira-task-search-input {
+  width: 100%;
+  height: 25px;
+  min-width: 0;
+  padding: 3px 7px;
+  border-radius: 6px;
+  border: 1px solid var(--vscode-input-border, var(--vscode-panel-border, rgba(255,255,255,0.14)));
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  font-size: 10.5px;
+  outline: none;
+}
+.jira-task-search-input:focus {
+  border-color: var(--vscode-focusBorder, #007acc);
+}
+.jira-task-search-input:disabled {
+  opacity: 0.62;
+}
+.jira-chat-scope-status.is-loading {
+  color: #d29922;
 }
 .chat-main {
   flex: 1;
@@ -320,6 +507,178 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.jira-context-panel {
+  width: 100%;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 8px 10px;
+  border: 1px solid rgba(63, 185, 80, 0.22);
+  border-radius: 6px;
+  background: rgba(63, 185, 80, 0.055);
+  max-height: min(46vh, 420px);
+  overflow: auto;
+}
+.jira-context-panel.hidden {
+  display: none;
+}
+.jira-context-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+.jira-context-heading {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.jira-context-title {
+  min-width: 0;
+  font-size: 11.5px;
+  font-weight: 700;
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.jira-context-meta,
+.jira-context-description,
+.jira-context-section-item,
+.jira-context-commit-repo,
+.jira-context-commit-branches,
+.jira-context-commit-suggestion {
+  font-size: 10px;
+  line-height: 1.35;
+  color: var(--vscode-descriptionForeground, rgba(255,255,255,0.68));
+}
+.jira-context-link {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--vscode-textLink-foreground, #4daafc);
+  text-decoration: none;
+}
+.jira-context-link:hover {
+  text-decoration: underline;
+}
+.jira-context-description {
+  max-height: 76px;
+  overflow: auto;
+  white-space: pre-wrap;
+  color: var(--vscode-foreground);
+}
+.jira-context-commits {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  overflow: visible;
+}
+.jira-context-commits-title {
+  font-size: 9.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--vscode-descriptionForeground, rgba(255,255,255,0.72));
+}
+.jira-context-section {
+  display: block;
+  padding: 0;
+  border: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.1));
+  border-radius: 5px;
+  background: rgba(0,0,0,0.08);
+  overflow: hidden;
+}
+.jira-context-section[open] {
+  background: rgba(0,0,0,0.12);
+}
+.jira-context-section-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  padding: 5px 7px;
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+}
+.jira-context-section-summary::-webkit-details-marker {
+  display: none;
+}
+.jira-context-section-summary::before {
+  content: '›';
+  grid-column: 1;
+  grid-row: 1;
+  width: 10px;
+  color: var(--vscode-descriptionForeground, rgba(255,255,255,0.68));
+  transform: translateY(-1px);
+}
+.jira-context-section[open] .jira-context-section-summary::before {
+  transform: rotate(90deg) translateX(1px);
+}
+.jira-context-section-title {
+  grid-column: 1;
+  grid-row: 1;
+  min-width: 0;
+  padding-left: 14px;
+  font-size: 9.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--vscode-descriptionForeground, rgba(255,255,255,0.72));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.jira-context-section-count {
+  grid-column: 2;
+  grid-row: 1;
+  min-width: 18px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 700;
+  text-align: center;
+  color: var(--vscode-descriptionForeground, rgba(255,255,255,0.72));
+  border: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.1));
+  background: rgba(255,255,255,0.035);
+}
+.jira-context-section-content {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 0 7px 7px;
+}
+.jira-context-section-item {
+  color: var(--vscode-foreground);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  padding-top: 2px;
+}
+.jira-context-section-item.muted {
+  color: var(--vscode-descriptionForeground, rgba(255,255,255,0.68));
+}
+.jira-context-commit {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 7px;
+  border: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.1));
+  border-radius: 5px;
+  background: rgba(0,0,0,0.1);
+}
+.jira-context-commit-line {
+  font-size: 10px;
+  line-height: 1.35;
+  font-weight: 600;
+  color: var(--vscode-foreground);
+  overflow-wrap: anywhere;
+}
+.jira-context-commit-suggestion {
+  color: #d29922;
 }
 .chat-pending-approval {
   font-size: 10px;
@@ -441,6 +800,54 @@
 }
 .chat-utility-toggle {
   max-width: 100%;
+}
+.chat-session-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 0 1px;
+}
+.chat-session-metrics-title {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--vscode-descriptionForeground, rgba(255,255,255,0.72));
+  margin-right: 2px;
+}
+.chat-session-metric {
+  min-height: 20px;
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.1));
+  background: rgba(255,255,255,0.032);
+  font-size: 10px;
+  line-height: 1.2;
+  color: var(--vscode-descriptionForeground, rgba(255,255,255,0.72));
+  white-space: nowrap;
+}
+.chat-session-metric.is-model,
+.chat-session-metric.is-tokens {
+  border-color: rgba(88, 166, 255, 0.28);
+  background: rgba(88, 166, 255, 0.08);
+  color: var(--vscode-textLink-foreground, #58a6ff);
+}
+.chat-session-metric.is-lines {
+  border-color: rgba(34, 197, 94, 0.28);
+  background: rgba(34, 197, 94, 0.08);
+  color: var(--vscode-terminal-ansiGreen, #22c55e);
+}
+.chat-session-metric.is-user-edits {
+  border-color: rgba(234, 179, 8, 0.32);
+  background: rgba(234, 179, 8, 0.1);
+  color: var(--vscode-terminal-ansiYellow, #eab308);
+}
+.chat-session-metric.is-errors,
+.chat-session-metric.is-rollbacks {
+  border-color: rgba(248, 81, 73, 0.32);
+  background: rgba(248, 81, 73, 0.1);
+  color: var(--vscode-errorForeground, #f85149);
 }
 .chat-session-memory-top {
   display: flex;
@@ -777,6 +1184,56 @@
 .chat-session-chip.is-active {
   border-color: rgba(96, 165, 250, 0.36);
   background: rgba(96, 165, 250, 0.07);
+}
+.chat-session-chip.is-jira {
+  border-color: rgba(63, 185, 80, 0.18);
+}
+.chat-session-chip.is-jira.is-active {
+  border-color: rgba(63, 185, 80, 0.38);
+  background: rgba(63, 185, 80, 0.08);
+}
+.chat-session-status-group {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.chat-session-status-group + .chat-session-status-group {
+  margin-top: 4px;
+}
+.chat-session-status-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 2px 0;
+}
+.chat-session-status-title {
+  min-width: 0;
+  font-size: 9.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--vscode-descriptionForeground, rgba(255,255,255,0.68));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chat-session-status-count {
+  flex-shrink: 0;
+  min-width: 18px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  text-align: center;
+  font-size: 9px;
+  font-weight: 600;
+  border: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.1));
+  color: var(--vscode-descriptionForeground, rgba(255,255,255,0.72));
+  background: rgba(255,255,255,0.03);
+}
+.chat-session-status-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 .chat-session-main {
   min-width: 0;

@@ -115,6 +115,17 @@
       var run = runs.ensureRun(state);
       var shouldStick = shared.isNearBottom(state.messagesEl);
 
+      if (phase === 'agent-model') {
+        run.model = data.model ? String(data.model) : run.model;
+        runs.updateRunStats(run);
+        return;
+      }
+
+      if (phase === 'agent-model-usage') {
+        runs.recordModelUsage(run, data);
+        return;
+      }
+
       if (phase === 'agent-think') {
         runs.settleRunningSteps(run, 'done');
         var thinkSignature = shared.compactTraceText(text);
@@ -232,6 +243,9 @@
           nextStep: resultNextStep,
           state: data.error ? 'error' : 'done',
         });
+        if (data.error) {
+          runs.recordToolError(run, 'tool:' + String(data.step || '') + ':' + String(data.tool || ''));
+        }
         updateSequenceProgress(run, data.step, data.error ? 'error' : 'done');
         syncApprovalCardWithResult(resultStep, data);
         if (data.tool === 'subagent') {
@@ -276,6 +290,9 @@
           preview: shared.buildResultPreview(data),
           state: data.error ? 'error' : 'done',
         });
+        if (data.error) {
+          runs.recordToolError(run, 'batch:' + String(data.step || '') + ':' + String(data.index || '') + ':' + String(data.tool || ''));
+        }
         runs.updateRunSummary(run, shared.compactTraceText(data.resultSummary || 'Пакет утилит обновлён'));
         shared.scrollToBottom(state.messagesEl, shouldStick);
         return;
@@ -560,6 +577,7 @@
           state: 'error',
           preview: data.error || data.detail || text || '',
         });
+        runs.recordToolError(run, 'subagent:' + String(data.id || 'subagent'));
         subagents.updateSubagentHostStats(run, failed.parentStepKey);
         subagents.appendSubagentNote(state, run, data.detail || text, 'warning', failed.parentStepKey);
         runs.updateRunSummary(run, shared.compactTraceText(data.summary || 'Подагент завершился с ошибкой.'));
@@ -596,6 +614,9 @@
         });
         subagents.updateSubagentHostStats(run, lifecycle.parentStepKey);
         if (lifecycleState === 'error' || data.degraded) {
+          if (lifecycleState === 'error') {
+            runs.recordToolError(run, 'subagent-lifecycle:' + String(data.id || 'subagent'));
+          }
           subagents.appendSubagentNote(state, run, data.detail || data.summary || text, lifecycleState === 'error' ? 'warning' : 'muted', lifecycle.parentStepKey);
           runs.updateRunSummary(run, shared.compactTraceText(data.summary || 'Подагент изменил состояние.'));
           runs.updateRunStats(run);
@@ -648,6 +669,21 @@
       appendRunNote: function (run, text, tone, key) {
         if (!run || !text) return;
         runs.appendRunNote(state, run, text, tone, key);
+      },
+      recordFileChange: function (msg) {
+        if (!state.currentRun) return;
+        runs.recordFileChange(state.currentRun, msg);
+      },
+      recordFileChangeForRun: function (run, msg) {
+        runs.recordFileChange(run || state.currentRun, msg);
+      },
+      updateChangeMetrics: function (metrics) {
+        if (!state.currentRun) return;
+        runs.updateChangeMetrics(state.currentRun, metrics);
+      },
+      updateModelUsage: function (context) {
+        if (!state.currentRun) return;
+        runs.updateModelUsage(state.currentRun, context);
       },
       startRun: function () { return runs.createRun(state); },
       finishRun: function (nextState, summaryText) { return runs.finishRun(state, nextState, summaryText); },

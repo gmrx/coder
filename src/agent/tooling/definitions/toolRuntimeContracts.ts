@@ -86,6 +86,18 @@ export const TOOL_RUNTIME_CONTRACTS: Partial<Record<string, ToolRuntimeContract>
     validateInput: true,
     repeatPolicy: { allowSameArgsRetryAfter: ['error', 'degraded'], maxAttemptsPerCall: 2 },
   },
+  jira_list_projects: {
+    validateInput: true,
+    repeatPolicy: { allowSameArgsRetryAfter: ['error', 'degraded'], maxAttemptsPerCall: 2 },
+  },
+  jira_search_tasks: {
+    validateInput: true,
+    repeatPolicy: { allowSameArgsRetryAfter: ['error', 'degraded'], maxAttemptsPerCall: 2 },
+  },
+  jira_get_task: {
+    validateInput: true,
+    repeatPolicy: { allowSameArgsRetryAfter: ['error', 'degraded'], maxAttemptsPerCall: 2 },
+  },
   shell: { validateInput: true, checkPermissions: true },
   str_replace: { validateInput: true, checkPermissions: true },
   write_file: { validateInput: true, checkPermissions: true },

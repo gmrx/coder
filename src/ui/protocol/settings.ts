@@ -31,6 +31,7 @@ export interface ConnectionResultMessage {
   error: string;
   models: string[];
   modelsCount: number;
+  silent?: boolean;
 }
 
 export interface ModelTestsResultMessage {
@@ -42,6 +43,34 @@ export interface ModelTestsResultMessage {
 
 export interface McpInspectionResultMessage extends McpInspectionSnapshot {
   type: 'mcpInspectionResult';
+}
+
+export interface JiraCheckProjectPayload {
+  key: string;
+  name: string;
+  taskCount: number;
+  url: string;
+  tasks: JiraCheckTaskPayload[];
+}
+
+export interface JiraCheckTaskPayload {
+  key: string;
+  title: string;
+  description: string;
+  url: string;
+}
+
+export interface JiraCheckResultMessage {
+  type: 'jiraCheckResult';
+  ok: boolean;
+  error: string;
+  authUser: string;
+  authMode: 'anonymous' | 'basic';
+  baseUrl: string;
+  projectsCount: number;
+  totalTasks: number;
+  projects: JiraCheckProjectPayload[];
+  warning?: string;
 }
 
 export type SettingsRequestPayload = SettingsPayload;

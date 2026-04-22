@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { computeLineChangeStats } from '../../../core/lineDiff';
 import { decoder, truncate } from '../../../core/utils';
 import { buildToolApprovalRequest } from '../catalog';
 import {
@@ -1265,13 +1266,13 @@ function createStructuredEditResult(input: {
 }
 
 function buildReplaceSummary(oldText: string, newText: string, replacedCount: number): string {
-  const changed = countChangedLines(oldText, newText);
-  return `Точечная правка: ${replacedCount} ${pluralize(replacedCount, 'замена', 'замены', 'замен')}, изменено ${changed} ${pluralize(changed, 'строка', 'строки', 'строк')}.`;
+  const stats = computeLineChangeStats(oldText, newText);
+  return `Точечная правка: ${replacedCount} ${pluralize(replacedCount, 'замена', 'замены', 'замен')}, ${formatLineDelta(stats)}.`;
 }
 
 function buildWriteSummary(oldText: string, newText: string): string {
-  const changed = countChangedLines(oldText, newText);
-  return `Полная перезапись файла: ${countLines(oldText)} -> ${countLines(newText)} ${pluralize(countLines(newText), 'строка', 'строки', 'строк')}, изменено около ${changed} ${pluralize(changed, 'строки', 'строк', 'строк')}.`;
+  const stats = computeLineChangeStats(oldText, newText);
+  return `Полная перезапись файла: ${stats.beforeLines} -> ${stats.afterLines} ${pluralize(stats.afterLines, 'строка', 'строки', 'строк')}, ${formatLineDelta(stats)}.`;
 }
 
 function buildCreateSummary(newText: string): string {
@@ -1291,23 +1292,28 @@ function buildNotebookEditSummary(oldText: string, newText: string, cellIdx: num
     const lines = countLines(newText);
     return `Добавлена новая ячейка ${cellIdx} на ${lines} ${pluralize(lines, 'строку', 'строки', 'строк')}.`;
   }
-  const changed = countChangedLines(oldText, newText);
-  return `Изменена ячейка ${cellIdx}: ${countLines(oldText)} -> ${countLines(newText)} ${pluralize(countLines(newText), 'строка', 'строки', 'строк')}, изменено ${changed} ${pluralize(changed, 'строка', 'строки', 'строк')}.`;
+  const stats = computeLineChangeStats(oldText, newText);
+  return `Изменена ячейка ${cellIdx}: ${stats.beforeLines} -> ${stats.afterLines} ${pluralize(stats.afterLines, 'строка', 'строки', 'строк')}, ${formatLineDelta(stats)}.`;
 }
 
 function buildApprovalStats(oldText: string, newText: string): {
+  added: number;
+  removed: number;
   beforeLines: number;
   afterLines: number;
   oldBytes: number;
   newBytes: number;
   changedLines: number;
 } {
+  const lineStats = computeLineChangeStats(oldText, newText);
   return {
-    beforeLines: countLines(oldText),
-    afterLines: countLines(newText),
+    added: lineStats.added,
+    removed: lineStats.removed,
+    beforeLines: lineStats.beforeLines,
+    afterLines: lineStats.afterLines,
     oldBytes: Buffer.byteLength(oldText || '', 'utf-8'),
     newBytes: Buffer.byteLength(newText || '', 'utf-8'),
-    changedLines: countChangedLines(oldText, newText),
+    changedLines: Math.max(lineStats.added, lineStats.removed),
   };
 }
 
@@ -1316,15 +1322,8 @@ function countLines(text: string): number {
   return text.split('\n').length;
 }
 
-function countChangedLines(oldText: string, newText: string): number {
-  const oldLines = oldText.split('\n');
-  const newLines = newText.split('\n');
-  const maxLength = Math.max(oldLines.length, newLines.length);
-  let changed = 0;
-  for (let index = 0; index < maxLength; index++) {
-    if ((oldLines[index] || '') !== (newLines[index] || '')) changed += 1;
-  }
-  return changed;
+function formatLineDelta(stats: { added: number; removed: number }): string {
+  return `+${stats.added} / -${stats.removed}`;
 }
 
 function pluralize(value: number, one: string, few: string, many: string): string {

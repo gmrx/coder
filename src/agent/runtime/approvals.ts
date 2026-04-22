@@ -46,6 +46,8 @@ export interface AgentFileApprovalRequest extends AgentApprovalRequestBase {
   language?: string;
   summary?: string;
   stats?: {
+    added: number;
+    removed: number;
     beforeLines: number;
     afterLines: number;
     oldBytes: number;

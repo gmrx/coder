@@ -27,6 +27,7 @@ export type ActiveFileContext = {
 export type AgentTurnInput = {
   question: string;
   activeFile: ActiveFileContext;
+  externalContext?: string;
 };
 
 export type AgentTurnPreparationInput = AgentTurnInput & {
@@ -48,6 +49,8 @@ export type PreparedAgentTurn = {
   mutationQuery: boolean;
   needMermaid: boolean;
   retrievalAutoContext: boolean;
+  autoRetrievalQuery: string;
+  toolContextQuery: string;
 };
 
 export type AgentRuntimeConfig = Readonly<Pick<

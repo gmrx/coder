@@ -28,6 +28,18 @@ export interface PersistedFileChangePayload {
   diffLines: DiffLine[];
 }
 
+export interface PersistedChangeMetricsPayload {
+  pendingFiles: number;
+  pendingChanges: number;
+  agentLines: number;
+  agentModifiedByUserLines: number;
+  agentRemovedLines: number;
+  agentDeletedByUserLines: number;
+  userOnlyLines: number;
+  userRemovedLines: number;
+  unknownFiles: number;
+}
+
 interface PersistedArtifactBase {
   runId?: string;
 }
@@ -36,6 +48,7 @@ export type PersistedChatArtifact = (
   | { kind: 'statusMessage'; payload: { text: string } }
   | { kind: 'errorMessage'; payload: { text: string } }
   | { kind: 'fileChange'; payload: PersistedFileChangePayload }
+  | { kind: 'changeMetrics'; payload: PersistedChangeMetricsPayload }
   | { kind: 'changeStatus'; payload: { type: 'changeAccepted' | 'changeRejected'; changeId: string; error?: string } }
   | { kind: 'approvalRequest'; payload: AgentApprovalRequest }
   | { kind: 'approvalResolved'; payload: AgentApprovalResult }

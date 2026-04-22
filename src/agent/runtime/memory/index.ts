@@ -5,6 +5,7 @@ import {
   isBroadStudyQuery,
   isMcpCatalogQuery,
   isMcpFreshnessSensitiveQuery,
+  isJiraTopicQuery,
   isMutationIntentQuery,
   isPlanningIntentQuery,
 } from './intents';
@@ -134,6 +135,10 @@ export function hasEnoughContext(
     return memory.workspaceMutations >= 1 || (memory.readFiles.size >= 2 && memory.toolCalls >= 4);
   }
 
+  if (isJiraTopicQuery(question) && memory.keyFacts.some((fact) => fact.startsWith('Jira:'))) {
+    return true;
+  }
+
   const broadStudy = isBroadStudyQuery(question);
   const subagentQualityOk = memory.subagentBatches === 0 || memory.subagentErrorBatches <= 1;
   if (broadStudy) {
@@ -182,6 +187,7 @@ export {
   isBroadStudyQuery,
   isMcpCatalogQuery,
   isMcpFreshnessSensitiveQuery,
+  isJiraTopicQuery,
   isMutationIntentQuery,
   isPlanningIntentQuery,
   isToolResultError,

@@ -153,6 +153,8 @@ function buildFileApproval(
     summary: typeof meta?.summary === 'string' ? meta.summary : undefined,
     stats: meta?.stats && typeof meta.stats === 'object'
       ? {
+        added: Number(meta.stats.added) || 0,
+        removed: Number(meta.stats.removed) || 0,
         beforeLines: Number(meta.stats.beforeLines) || 0,
         afterLines: Number(meta.stats.afterLines) || 0,
         oldBytes: Number(meta.stats.oldBytes) || 0,

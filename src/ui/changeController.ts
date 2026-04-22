@@ -1,11 +1,13 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { getAgentWorkspaceFolder } from '../agent/worktreeSession';
-import { computeUnifiedDiff, type DiffLine } from './diff';
+import { computeLineChangeStats, computeLineDiffOperations } from '../core/lineDiff';
+import { computeUnifiedDiff } from './diff';
 import { EditorDecorationController } from './decorations';
 import { guessLanguage } from './language';
+import { classifyLineAttribution } from './lineProvenance';
 import { AiOriginalContentProvider } from './originalContentProvider';
-import type { FileChangeMessagePayload, WebviewMessageSink } from './protocol/messages';
+import type { ChangeMetricsPayload, FileChangeMessagePayload, WebviewMessageSink } from './protocol/messages';
 import type { FileSnapshot, PendingChangeSnapshot } from './state';
 
 interface ChangeControllerOptions {
@@ -36,16 +38,21 @@ export interface WorkspaceChangeControllerState {
   pendingChanges: SerializedPendingChangeEntry[];
   trackedFiles: string[];
   originalFileStates: SerializedFileStateEntry[];
+  manualOriginalFileStates?: SerializedFileStateEntry[];
+  manualUserLineKeys?: string[];
 }
 
 export class WorkspaceChangeController {
   private pendingChanges = new Map<string, PendingChangeSnapshot>();
   private trackedFiles = new Set<string>();
   private originalFileStates = new Map<string, FileSnapshot>();
+  private manualOriginalFileStates = new Map<string, FileSnapshot>();
+  private openDocumentTexts = new Map<string, string>();
 
   private scm: vscode.SourceControl | undefined;
   private scmGroup: vscode.SourceControlResourceGroup | undefined;
   private readonly decorationController: EditorDecorationController;
+  private metricsTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(private readonly options: ChangeControllerOptions) {
     this.decorationController = new EditorDecorationController({
@@ -53,6 +60,32 @@ export class WorkspaceChangeController {
       getPendingChanges: () => this.pendingChanges,
       getOriginalFileStates: () => this.originalFileStates,
     });
+
+    options.context.subscriptions.push(
+      vscode.workspace.onDidOpenTextDocument((document) => {
+        this.rememberOpenDocumentText(document);
+      }),
+      vscode.workspace.onDidChangeTextDocument((event) => {
+        if (event.document.uri.scheme !== 'file') return;
+        const filePath = vscode.workspace.asRelativePath(event.document.uri, false);
+        const markedManualChange = this.markManualDocumentChange(event);
+        this.rememberOpenDocumentText(event.document);
+        if (markedManualChange || this.trackedFiles.has(filePath) || this.hasPendingChangesForFile(filePath)) {
+          this.scheduleMetricsPost();
+        }
+      }),
+      vscode.workspace.onDidCloseTextDocument((document) => {
+        if (document.uri.scheme !== 'file') return;
+        const filePath = vscode.workspace.asRelativePath(document.uri, false);
+        if (this.trackedFiles.has(filePath) || this.hasPendingChangesForFile(filePath)) {
+          this.scheduleMetricsPost();
+        }
+        this.openDocumentTexts.delete(document.uri.toString());
+      }),
+    );
+    for (const document of vscode.workspace.textDocuments) {
+      this.rememberOpenDocumentText(document);
+    }
 
     this.refreshWorkspaceContext();
   }
@@ -70,6 +103,7 @@ export class WorkspaceChangeController {
       pendingChanges: Array.from(this.pendingChanges, ([key, value]) => [key, { ...value }]),
       trackedFiles: Array.from(this.trackedFiles),
       originalFileStates: Array.from(this.originalFileStates, ([key, value]) => [key, { ...value }]),
+      manualOriginalFileStates: Array.from(this.manualOriginalFileStates, ([key, value]) => [key, { ...value }]),
     };
   }
 
@@ -78,6 +112,7 @@ export class WorkspaceChangeController {
       this.pendingChanges.clear();
       this.trackedFiles.clear();
       this.originalFileStates.clear();
+      this.manualOriginalFileStates.clear();
       this.options.originalProvider.clear();
       this.refreshScm();
       return;
@@ -101,6 +136,15 @@ export class WorkspaceChangeController {
 
     this.originalFileStates = new Map(
       (Array.isArray(state.originalFileStates) ? state.originalFileStates : [])
+        .filter((entry) => Array.isArray(entry) && typeof entry[0] === 'string' && entry[1] && typeof entry[1] === 'object')
+        .map(([key, value]) => [key, {
+          content: typeof value.content === 'string' ? value.content : '',
+          existed: !!value.existed,
+        }] as [string, FileSnapshot]),
+    );
+
+    this.manualOriginalFileStates = new Map(
+      (Array.isArray(state.manualOriginalFileStates) ? state.manualOriginalFileStates : [])
         .filter((entry) => Array.isArray(entry) && typeof entry[0] === 'string' && entry[1] && typeof entry[1] === 'object')
         .map(([key, value]) => [key, {
           content: typeof value.content === 'string' ? value.content : '',
@@ -140,6 +184,7 @@ export class WorkspaceChangeController {
   }
 
   refreshScm() {
+    this.scheduleMetricsPost();
     if (!this.scm || !this.scmGroup) return;
     const folder = getAgentWorkspaceFolder();
     if (!folder) return;
@@ -191,6 +236,7 @@ export class WorkspaceChangeController {
 
     if (!this.originalFileStates.has(filePath)) {
       this.trackedFiles.add(filePath);
+      this.manualOriginalFileStates.delete(filePath);
       this.originalFileStates.set(filePath, {
         content: fullOldText,
         existed: existedBefore,
@@ -215,7 +261,7 @@ export class WorkspaceChangeController {
       changeType: meta.changeType || 'edit',
       tool: meta.tool || 'unknown',
       summary: meta.summary || '',
-      stats: buildFileChangeStats(fullOldText, fullNewText, diffLines),
+      stats: computeLineChangeStats(fullOldText, fullNewText),
       oldSnippet: meta.oldSnippet || '',
       newSnippet: meta.newSnippet || '',
       cellIdx: meta.cellIdx,
@@ -379,6 +425,57 @@ export class WorkspaceChangeController {
     }
   }
 
+  async collectChangeMetrics(): Promise<ChangeMetricsPayload> {
+    const metrics: ChangeMetricsPayload = {
+      pendingFiles: 0,
+      pendingChanges: this.pendingChanges.size,
+      agentLines: 0,
+      agentModifiedByUserLines: 0,
+      agentRemovedLines: 0,
+      agentDeletedByUserLines: 0,
+      userOnlyLines: 0,
+      userRemovedLines: 0,
+      unknownFiles: 0,
+    };
+
+    const changesByFile = new Map<string, PendingChangeSnapshot[]>();
+    for (const change of this.pendingChanges.values()) {
+      if (!change.filePath) continue;
+      const fileChanges = changesByFile.get(change.filePath) || [];
+      fileChanges.push(change);
+      changesByFile.set(change.filePath, fileChanges);
+    }
+
+    metrics.pendingFiles = changesByFile.size;
+
+    for (const [filePath, changes] of changesByFile) {
+      const original = this.originalFileStates.get(filePath);
+      const originalText = original?.content || '';
+      const latestAgentText = changes.length > 0 ? changes[changes.length - 1].newText : originalText;
+      const currentText = await this.readCurrentFileText(filePath, latestAgentText);
+      const attribution = classifyLineAttribution(originalText, changes, currentText);
+
+      metrics.agentLines += attribution.agentLines.size;
+      metrics.agentModifiedByUserLines += attribution.agentModifiedByUserLines.size;
+      metrics.agentRemovedLines += attribution.agentRemovedLines;
+      metrics.agentDeletedByUserLines += attribution.agentDeletedByUserLines;
+      metrics.userOnlyLines += attribution.userOnlyLines.size;
+      metrics.userRemovedLines += attribution.userRemovedLines;
+      if (attribution.unknown) metrics.unknownFiles += 1;
+    }
+
+    for (const [filePath, original] of this.manualOriginalFileStates) {
+      if (!filePath || changesByFile.has(filePath) || this.trackedFiles.has(filePath)) continue;
+      const currentText = await this.readCurrentFileText(filePath, original.content);
+      const manualStats = computeManualUserLineMetrics(original.content, currentText);
+      metrics.userOnlyLines += manualStats.added;
+      metrics.userRemovedLines += manualStats.removed;
+      if (manualStats.unknown) metrics.unknownFiles += 1;
+    }
+
+    return metrics;
+  }
+
   private cleanupResolvedFile(filePath: string) {
     if (this.hasPendingChangesForFile(filePath)) return;
 
@@ -392,6 +489,70 @@ export class WorkspaceChangeController {
       if (change.filePath === filePath) return true;
     }
     return false;
+  }
+
+  private markManualDocumentChange(event: vscode.TextDocumentChangeEvent): boolean {
+    const filePath = this.toWorkspaceFilePath(event.document.uri);
+    if (!filePath) return false;
+    if (this.trackedFiles.has(filePath) || this.hasPendingChangesForFile(filePath)) return false;
+
+    if (!this.manualOriginalFileStates.has(filePath)) {
+      this.manualOriginalFileStates.set(filePath, {
+        content: this.openDocumentTexts.get(event.document.uri.toString()) ?? event.document.getText(),
+        existed: true,
+      });
+    }
+    return true;
+  }
+
+  private toWorkspaceFilePath(uri: vscode.Uri): string {
+    if (!vscode.workspace.getWorkspaceFolder(uri)) return '';
+    return vscode.workspace.asRelativePath(uri, false);
+  }
+
+  private rememberOpenDocumentText(document: vscode.TextDocument): void {
+    if (document.uri.scheme !== 'file') return;
+    if (!vscode.workspace.getWorkspaceFolder(document.uri)) return;
+    this.openDocumentTexts.set(document.uri.toString(), document.getText());
+  }
+
+  private scheduleMetricsPost() {
+    if (this.metricsTimer) clearTimeout(this.metricsTimer);
+    this.metricsTimer = setTimeout(() => {
+      this.metricsTimer = undefined;
+      void this.postChangeMetrics();
+    }, 200);
+  }
+
+  private async postChangeMetrics(): Promise<void> {
+    try {
+      this.options.post({ type: 'changeMetrics', metrics: await this.collectChangeMetrics() });
+    } catch {
+      // Метрики не должны ломать основной сценарий чата.
+    }
+  }
+
+  private async readCurrentFileText(filePath: string, fallback: string): Promise<string> {
+    const uri = this.resolveFileUri(filePath);
+    if (!uri) return fallback;
+
+    const openDocument = vscode.workspace.textDocuments.find((document) => document.uri.toString() === uri.toString());
+    if (openDocument) return openDocument.getText();
+
+    try {
+      const bytes = await vscode.workspace.fs.readFile(uri);
+      return Buffer.from(bytes).toString('utf-8');
+    } catch {
+      return '';
+    }
+  }
+
+  private resolveFileUri(filePath: string): vscode.Uri | null {
+    const normalizedPath = String(filePath || '').trim();
+    if (!normalizedPath) return null;
+    if (path.isAbsolute(normalizedPath)) return vscode.Uri.file(normalizedPath);
+    const folder = getAgentWorkspaceFolder();
+    return folder ? vscode.Uri.joinPath(folder.uri, normalizedPath) : vscode.Uri.file(path.resolve(normalizedPath));
   }
 
   refreshWorkspaceContext() {
@@ -415,23 +576,22 @@ export class WorkspaceChangeController {
   }
 }
 
-function buildFileChangeStats(oldText: string, newText: string, diffLines: DiffLine[]) {
-  let added = 0;
-  let removed = 0;
-  for (const line of diffLines) {
-    if (line.type === 'add') added += 1;
-    if (line.type === 'del') removed += 1;
+function computeManualUserLineMetrics(originalText: string, currentText: string): { added: number; removed: number; unknown: boolean } {
+  if (originalText === currentText) {
+    return { added: 0, removed: 0, unknown: false };
   }
 
-  return {
-    added,
-    removed,
-    beforeLines: countLines(oldText),
-    afterLines: countLines(newText),
-  };
-}
+  const operations = computeLineDiffOperations(originalText, currentText);
+  if (!operations) {
+    const stats = computeLineChangeStats(originalText, currentText);
+    return { added: stats.added, removed: stats.removed, unknown: true };
+  }
 
-function countLines(text: string): number {
-  if (!text) return 0;
-  return text.split('\n').length;
+  let added = 0;
+  let removed = 0;
+  for (const operation of operations) {
+    if (operation.type === 'add') added += 1;
+    else if (operation.type === 'del') removed += 1;
+  }
+  return { added, removed, unknown: false };
 }
