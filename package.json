@@ -2,7 +2,7 @@
   "name": "coder",
   "displayName": "ИИ Кодогенератор",
   "description": "ИИ-кодогенератор для VS Code с агентным циклом и поддержкой любого LLM API.",
-  "version": "0.0.271",
+  "version": "0.0.272",
   "author": "Мартин Газов (gmrx)",
   "publisher": "gmrx",
   "license": "SEE LICENSE IN LICENSE",
@@ -228,7 +228,8 @@
   "dependencies": {
     "highlight.js": "^11.11.1",
     "markdown-it": "^14.1.1",
-    "mermaid": "^11.13.0"
+    "mermaid": "^11.13.0",
+    "undici": "^6.25.0"
   },
   "overrides": {
     "xml2js": ">=0.5.0"
