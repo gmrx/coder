@@ -1,5 +1,6 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import { getExtensionStorageSubdir } from '../../core/extensionStorage';
 
 export type AgentTaskKind = 'generic' | 'shell';
 export type AgentTaskStatus =
@@ -34,7 +35,7 @@ export interface AgentTaskRecord {
   note?: string;
 }
 
-const TASK_STORE_DIR = '.cursorcoder/tasks';
+const TASK_STORE_DIR = 'tasks';
 const PENDING_TIMEOUT_MS = 15_000;
 
 function getWorkspaceRootPath(explicitRootPath?: string): string {
@@ -50,7 +51,7 @@ function getWorkspaceRootPath(explicitRootPath?: string): string {
 }
 
 export function getTaskStoreRootPath(explicitRootPath?: string): string {
-  return path.join(getWorkspaceRootPath(explicitRootPath), TASK_STORE_DIR);
+  return getExtensionStorageSubdir(TASK_STORE_DIR);
 }
 
 export function getTaskDirPath(taskId: string, explicitRootPath?: string): string {

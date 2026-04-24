@@ -100,6 +100,9 @@
       case 'jiraCheckResult':
         settings.handleJiraCheckResult(msg);
         return;
+      case 'tfsCheckResult':
+        settings.handleTfsCheckResult(msg);
+        return;
       case 'settingsSaved':
         settings.handleSettingsSaved(msg);
         return;

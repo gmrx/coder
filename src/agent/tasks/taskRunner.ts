@@ -1,29 +1,34 @@
 import * as fsSync from 'fs';
 import { spawn } from 'child_process';
+import { initExtensionStoragePath } from '../../core/extensionStorage';
 import { patchTaskRecord, readTaskRecord, type AgentTaskStatus } from './store';
 
 type CliArgs = {
   rootPath: string;
   taskId: string;
+  storagePath: string;
 };
 
 function parseArgs(argv: string[]): CliArgs {
   const args = argv.slice(2);
   let rootPath = '';
   let taskId = '';
+  let storagePath = '';
   for (let index = 0; index < args.length; index++) {
     const token = args[index];
     if (token === '--root') rootPath = String(args[index + 1] || '');
     if (token === '--task') taskId = String(args[index + 1] || '');
+    if (token === '--storage') storagePath = String(args[index + 1] || '');
   }
   if (!rootPath || !taskId) {
-    throw new Error('Usage: node taskRunner.js --root <workspaceRoot> --task <taskId>');
+    throw new Error('Usage: node taskRunner.js --root <workspaceRoot> --task <taskId> [--storage <extensionStoragePath>]');
   }
-  return { rootPath, taskId };
+  return { rootPath, taskId, storagePath };
 }
 
 async function main(): Promise<void> {
-  const { rootPath, taskId } = parseArgs(process.argv);
+  const { rootPath, taskId, storagePath } = parseArgs(process.argv);
+  initExtensionStoragePath(storagePath);
   const task = await readTaskRecord(taskId, rootPath);
   if (!task || task.kind !== 'shell' || !task.command) {
     throw new Error(`Task "${taskId}" не найден или не является shell background job.`);
@@ -119,4 +124,3 @@ void main().catch(async (error: any) => {
   console.error(error?.message || String(error));
   process.exit(1);
 });
-

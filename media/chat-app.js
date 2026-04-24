@@ -951,10 +951,12 @@
 
   function updateJiraContext(context) {
     if (!jiraContextPanelEl) return;
-    var visible = !!(context && context.issueKey);
-    var issueKey = visible ? String(context.issueKey || '') : '';
-    if (issueKey !== currentJiraContextKey) {
-      currentJiraContextKey = issueKey;
+    var visible = !!(context && (context.issueKey || context.workItemId));
+    var system = context && context.system === 'tfs' ? 'tfs' : 'jira';
+    var issueKey = visible ? String(context.issueKey || (context.workItemId ? '#' + context.workItemId : '')) : '';
+    var contextKey = visible ? system + ':' + issueKey : '';
+    if (contextKey !== currentJiraContextKey) {
+      currentJiraContextKey = contextKey;
       jiraContextPanelOpen = false;
     }
     updateJiraContextToggle(visible);
@@ -993,6 +995,7 @@
     if (jiraContextLinkEl) {
       if (context.url) {
         jiraContextLinkEl.href = context.url;
+        jiraContextLinkEl.title = system === 'tfs' ? 'Открыть work item TFS' : 'Открыть задачу Jira';
         jiraContextLinkEl.classList.remove('hidden');
       } else {
         jiraContextLinkEl.classList.add('hidden');
@@ -1088,7 +1091,8 @@
   }
 
   function createJiraContextSection(context, title, count) {
-    var key = [context && context.issueKey ? context.issueKey : 'jira', title || 'section'].join(':');
+    var system = context && context.system === 'tfs' ? 'tfs' : 'jira';
+    var key = [system, context && context.issueKey ? context.issueKey : 'task', title || 'section'].join(':');
     var details = document.createElement('details');
     details.className = 'jira-context-section';
     details.open = jiraContextOpenSections[key] === true;
@@ -1836,7 +1840,7 @@
       metrics.resetFromSnapshot(msg.messages, msg.traceRuns, msg.artifactEvents);
       updateRuntimeState(msg.agentMode, msg.awaitingPlanApproval, msg.pendingApproval, msg.pendingQuestion);
       updateRuntimeProgress(msg.progress);
-      updateJiraContext(msg.jiraContext || null);
+      updateJiraContext(msg.taskContext || msg.jiraContext || msg.tfsContext || null);
       updateSessionMemory(msg.sessionMemory);
       renderComposerPermissions(msg.autoApproval || composerPermissionsState);
       runtimeTodos = Array.isArray(msg.todos) ? msg.todos.slice() : [];

@@ -56,6 +56,9 @@ export function initConfigStorage(globalState: vscode.Memento) {
 export function readConfig(): AssistantConfig {
   const fallback = vscode.workspace.getConfiguration('aiAssistant');
   const storedAutoApproval = _state?.get<Partial<AssistantAutoApprovalConfig>>('autoApproval');
+  const storedSystemPrompt = _state?.get<string>('systemPrompt');
+  const storedMcpConfigPath = _state?.get<string>('mcpConfigPath');
+  const storedMcpServers = _state?.get<Record<string, unknown>>('mcpServers');
   const configuredAutoApproval = fallback.get<Partial<AssistantAutoApprovalConfig>>('autoApproval');
   const storedTrustedHosts = _state?.get<unknown>('webTrustedHosts');
   const storedBlockedHosts = _state?.get<unknown>('webBlockedHosts');
@@ -67,17 +70,21 @@ export function readConfig(): AssistantConfig {
     model: _state?.get<string>('model') || fallback.get<string>('model') || '',
     embeddingsModel: _state?.get<string>('embeddingsModel') || '',
     rerankModel: _state?.get<string>('rerankModel') || '',
-    systemPrompt: _state?.get<string>('systemPrompt') || fallback.get<string>('systemPrompt') || '',
-    mcpConfigPath: fallback.get<string>('mcpConfigPath') || '',
-    mcpServers: fallback.get<Record<string, unknown>>('mcpServers') || {},
-    mcpDisabledTools: normalizeMcpDisabledTools(fallback.get<unknown>('mcpDisabledTools') || storedDisabledMcpTools || []),
-    mcpTrustedTools: normalizeMcpTrustedTools(fallback.get<unknown>('mcpTrustedTools') || storedTrustedMcpTools || []),
-    webTrustedHosts: normalizeHostList(fallback.get<unknown>('webTrustedHosts') || storedTrustedHosts || []),
-    webBlockedHosts: normalizeHostList(fallback.get<unknown>('webBlockedHosts') || storedBlockedHosts || []),
+    systemPrompt: storedSystemPrompt ?? fallback.get<string>('systemPrompt') ?? '',
+    mcpConfigPath: storedMcpConfigPath ?? fallback.get<string>('mcpConfigPath') ?? '',
+    mcpServers: storedMcpServers ?? fallback.get<Record<string, unknown>>('mcpServers') ?? {},
+    mcpDisabledTools: normalizeMcpDisabledTools(storedDisabledMcpTools ?? fallback.get<unknown>('mcpDisabledTools') ?? []),
+    mcpTrustedTools: normalizeMcpTrustedTools(storedTrustedMcpTools ?? fallback.get<unknown>('mcpTrustedTools') ?? []),
+    webTrustedHosts: normalizeHostList(storedTrustedHosts ?? fallback.get<unknown>('webTrustedHosts') ?? []),
+    webBlockedHosts: normalizeHostList(storedBlockedHosts ?? fallback.get<unknown>('webBlockedHosts') ?? []),
     jiraBaseUrl: _state?.get<string>('jiraBaseUrl') || fallback.get<string>('jiraBaseUrl') || '',
     jiraUsername: _state?.get<string>('jiraUsername') || fallback.get<string>('jiraUsername') || '',
     jiraPassword: _state?.get<string>('jiraPassword') || fallback.get<string>('jiraPassword') || '',
-    autoApproval: normalizeAutoApproval(configuredAutoApproval || storedAutoApproval || DEFAULT_AUTO_APPROVAL),
+    tfsBaseUrl: _state?.get<string>('tfsBaseUrl') || fallback.get<string>('tfsBaseUrl') || '',
+    tfsCollection: _state?.get<string>('tfsCollection') || fallback.get<string>('tfsCollection') || '',
+    tfsUsername: _state?.get<string>('tfsUsername') || fallback.get<string>('tfsUsername') || '',
+    tfsPassword: _state?.get<string>('tfsPassword') || fallback.get<string>('tfsPassword') || '',
+    autoApproval: normalizeAutoApproval(storedAutoApproval ?? configuredAutoApproval ?? DEFAULT_AUTO_APPROVAL),
   };
 }
 
@@ -91,83 +98,37 @@ export async function saveConfig(data: Partial<AssistantConfig>): Promise<void> 
   if (data.jiraBaseUrl !== undefined) await _state.update('jiraBaseUrl', data.jiraBaseUrl || undefined);
   if (data.jiraUsername !== undefined) await _state.update('jiraUsername', data.jiraUsername || undefined);
   if (data.jiraPassword !== undefined) await _state.update('jiraPassword', data.jiraPassword || undefined);
-  if (data.systemPrompt !== undefined) {
-    const config = vscode.workspace.getConfiguration('aiAssistant');
-    const target = vscode.workspace.workspaceFolders?.length
-      ? vscode.ConfigurationTarget.Workspace
-      : vscode.ConfigurationTarget.Global;
-    const normalizedSystemPrompt = String(data.systemPrompt || '').trim();
-    try {
-      await config.update('systemPrompt', normalizedSystemPrompt || undefined, target);
-      await _state.update('systemPrompt', undefined);
-    } catch {
-      await _state.update('systemPrompt', normalizedSystemPrompt || undefined);
-    }
-  }
+  if (data.tfsBaseUrl !== undefined) await _state.update('tfsBaseUrl', data.tfsBaseUrl || undefined);
+  if (data.tfsCollection !== undefined) await _state.update('tfsCollection', data.tfsCollection || undefined);
+  if (data.tfsUsername !== undefined) await _state.update('tfsUsername', data.tfsUsername || undefined);
+  if (data.tfsPassword !== undefined) await _state.update('tfsPassword', data.tfsPassword || undefined);
+  if (data.systemPrompt !== undefined) await _state.update('systemPrompt', String(data.systemPrompt || '').trim());
   if (data.autoApproval !== undefined) {
-    const config = vscode.workspace.getConfiguration('aiAssistant');
-    const target = vscode.workspace.workspaceFolders?.length
-      ? vscode.ConfigurationTarget.Workspace
-      : vscode.ConfigurationTarget.Global;
     const normalizedAutoApproval = normalizeAutoApproval(data.autoApproval);
-    try {
-      await config.update('autoApproval', normalizedAutoApproval, target);
-      await _state.update('autoApproval', undefined);
-    } catch {
-      await _state.update('autoApproval', normalizedAutoApproval);
-    }
+    await _state.update('autoApproval', normalizedAutoApproval);
   }
   if (data.webTrustedHosts !== undefined) {
-    const config = vscode.workspace.getConfiguration('aiAssistant');
-    const target = vscode.workspace.workspaceFolders?.length
-      ? vscode.ConfigurationTarget.Workspace
-      : vscode.ConfigurationTarget.Global;
     const normalizedTrustedHosts = normalizeHostList(data.webTrustedHosts);
-    try {
-      await config.update('webTrustedHosts', normalizedTrustedHosts, target);
-      await _state.update('webTrustedHosts', undefined);
-    } catch {
-      await _state.update('webTrustedHosts', normalizedTrustedHosts);
-    }
+    await _state.update('webTrustedHosts', normalizedTrustedHosts);
   }
   if (data.webBlockedHosts !== undefined) {
-    const config = vscode.workspace.getConfiguration('aiAssistant');
-    const target = vscode.workspace.workspaceFolders?.length
-      ? vscode.ConfigurationTarget.Workspace
-      : vscode.ConfigurationTarget.Global;
     const normalizedBlockedHosts = normalizeHostList(data.webBlockedHosts);
-    try {
-      await config.update('webBlockedHosts', normalizedBlockedHosts, target);
-      await _state.update('webBlockedHosts', undefined);
-    } catch {
-      await _state.update('webBlockedHosts', normalizedBlockedHosts);
-    }
+    await _state.update('webBlockedHosts', normalizedBlockedHosts);
   }
   if (data.mcpDisabledTools !== undefined) {
-    const config = vscode.workspace.getConfiguration('aiAssistant');
-    const target = vscode.workspace.workspaceFolders?.length
-      ? vscode.ConfigurationTarget.Workspace
-      : vscode.ConfigurationTarget.Global;
     const normalizedDisabledTools = normalizeMcpDisabledTools(data.mcpDisabledTools);
-    try {
-      await config.update('mcpDisabledTools', normalizedDisabledTools, target);
-      await _state.update('mcpDisabledTools', undefined);
-    } catch {
-      await _state.update('mcpDisabledTools', normalizedDisabledTools);
-    }
+    await _state.update('mcpDisabledTools', normalizedDisabledTools);
   }
   if (data.mcpTrustedTools !== undefined) {
-    const config = vscode.workspace.getConfiguration('aiAssistant');
-    const target = vscode.workspace.workspaceFolders?.length
-      ? vscode.ConfigurationTarget.Workspace
-      : vscode.ConfigurationTarget.Global;
     const normalizedTrustedTools = normalizeMcpTrustedTools(data.mcpTrustedTools);
-    try {
-      await config.update('mcpTrustedTools', normalizedTrustedTools, target);
-      await _state.update('mcpTrustedTools', undefined);
-    } catch {
-      await _state.update('mcpTrustedTools', normalizedTrustedTools);
-    }
+    await _state.update('mcpTrustedTools', normalizedTrustedTools);
+  }
+  if (data.mcpConfigPath !== undefined) await _state.update('mcpConfigPath', String(data.mcpConfigPath || '').trim());
+  if (data.mcpServers !== undefined) {
+    const normalizedServers = data.mcpServers && typeof data.mcpServers === 'object' && !Array.isArray(data.mcpServers)
+      ? data.mcpServers
+      : {};
+    await _state.update('mcpServers', normalizedServers);
   }
 }
 

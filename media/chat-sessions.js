@@ -27,8 +27,19 @@
     var taskFilter = '';
     var taskSearchWrapEl = null;
     var taskSearchInputEl = null;
-    var lastJiraProjectKey = '';
+    var lastTaskScopeKey = '';
     var jira = {
+      selectedProjectKey: '',
+      selectedProjectName: '',
+      authOk: false,
+      authUser: '',
+      error: '',
+      projectsLoading: false,
+      tasksLoading: false,
+      tasksError: '',
+      projects: []
+    };
+    var tfs = {
       selectedProjectKey: '',
       selectedProjectName: '',
       authOk: false,
@@ -41,9 +52,13 @@
     };
     var busy = false;
     var jiraProjectPicker = jiraProjectSelectEl
-      ? createJiraProjectPicker(jiraProjectSelectEl, function (projectKey) {
+      ? createJiraProjectPicker(jiraProjectSelectEl, function (scope) {
           if (busy) return;
-          vscode.postMessage({ type: 'selectJiraProject', projectKey: projectKey || '' });
+          vscode.postMessage({
+            type: 'selectTaskProject',
+            source: scope && scope.source ? scope.source : 'free',
+            projectKey: scope && scope.projectKey ? scope.projectKey : ''
+          });
         })
       : null;
 
@@ -62,6 +77,74 @@
       };
     }
 
+    function normalizeTfsState(value) {
+      var source = value && typeof value === 'object' ? value : {};
+      return {
+        selectedProjectKey: String(source.selectedProjectKey || ''),
+        selectedProjectName: String(source.selectedProjectName || ''),
+        authOk: source.authOk === true,
+        authUser: String(source.authUser || ''),
+        error: String(source.error || ''),
+        projectsLoading: source.projectsLoading === true,
+        tasksLoading: source.tasksLoading === true,
+        tasksError: String(source.tasksError || ''),
+        projects: Array.isArray(source.projects) ? source.projects.slice() : []
+      };
+    }
+
+    function isTaskMode() {
+      return mode === 'jira' || mode === 'tfs';
+    }
+
+    function getActiveTaskState() {
+      return mode === 'tfs' ? tfs : jira;
+    }
+
+    function encodeTaskScopeValue(source, projectKey) {
+      if (!source || source === 'free' || !projectKey) return '';
+      return source + ':' + encodeURIComponent(String(projectKey));
+    }
+
+    function parseTaskScopeValue(value) {
+      var text = String(value || '');
+      var match = text.match(/^(jira|tfs):(.*)$/);
+      if (!match) return { source: 'free', projectKey: '' };
+      try {
+        return { source: match[1], projectKey: decodeURIComponent(match[2] || '') };
+      } catch (error) {
+        return { source: match[1], projectKey: match[2] || '' };
+      }
+    }
+
+    function getSelectedTaskScopeValue() {
+      if (mode === 'jira') return encodeTaskScopeValue('jira', jira.selectedProjectKey);
+      if (mode === 'tfs') return encodeTaskScopeValue('tfs', tfs.selectedProjectKey);
+      return '';
+    }
+
+    function getTaskScopeOptions() {
+      var items = [];
+      jira.projects.forEach(function (project) {
+        items.push({
+          source: 'jira',
+          key: String(project.key || ''),
+          name: String(project.name || ''),
+          url: String(project.url || '')
+        });
+      });
+      tfs.projects.forEach(function (project) {
+        var key = String(project.key || project.name || '');
+        items.push({
+          source: 'tfs',
+          key: key,
+          name: String(project.name || key),
+          url: String(project.url || ''),
+          description: String(project.description || '')
+        });
+      });
+      return items.filter(function (project) { return project.key; });
+    }
+
     function createJiraProjectPicker(selectEl, onSelect) {
       var row = selectEl.parentElement;
       var projects = [];
@@ -75,7 +158,7 @@
       var trigger = document.createElement('button');
       trigger.type = 'button';
       trigger.className = 'jira-project-picker-trigger placeholder';
-      trigger.title = 'Выбрать проект Jira или обычный чат';
+      trigger.title = 'Выбрать обычный чат, проект Jira или проект TFS';
 
       var triggerText = document.createElement('span');
       triggerText.className = 'jira-project-picker-text';
@@ -94,7 +177,7 @@
 
       var searchInput = document.createElement('input');
       searchInput.className = 'jira-project-dropdown-search';
-      searchInput.placeholder = 'Найти проект Jira...';
+      searchInput.placeholder = 'Найти проект Jira или TFS...';
       searchInput.spellcheck = false;
       dropdown.appendChild(searchInput);
 
@@ -104,13 +187,16 @@
 
       function getProjectLabel(project) {
         if (!project) return '';
-        return (project.key || '') + (project.name ? ' • ' + project.name : '');
+        var source = project.source === 'tfs' ? 'TFS' : 'Jira';
+        var key = project.key || '';
+        var name = project.name && project.name !== key ? ' • ' + project.name : '';
+        return source + ' • ' + key + name;
       }
 
       function findProject(value) {
-        var key = String(value || '').toUpperCase();
+        var selected = String(value || '');
         return projects.find(function (project) {
-          return String(project.key || '').toUpperCase() === key;
+          return encodeTaskScopeValue(project.source, project.key) === selected;
         }) || null;
       }
 
@@ -120,7 +206,9 @@
           triggerText.textContent = getProjectLabel(project);
           trigger.classList.remove('placeholder');
         } else if (selectedValue) {
-          triggerText.textContent = selectedValue;
+          var scope = parseTaskScopeValue(selectedValue);
+          var source = scope.source === 'tfs' ? 'TFS' : scope.source === 'jira' ? 'Jira' : '';
+          triggerText.textContent = [source, scope.projectKey || selectedValue].filter(Boolean).join(' • ');
           trigger.classList.remove('placeholder');
         } else {
           triggerText.textContent = 'Обычный чат';
@@ -134,7 +222,7 @@
         selectEl.value = selectedValue;
         updateTrigger();
         close();
-        if (!silent && typeof onSelect === 'function') onSelect(selectedValue);
+        if (!silent && typeof onSelect === 'function') onSelect(parseTaskScopeValue(selectedValue));
       }
 
       function position() {
@@ -158,7 +246,7 @@
 
       function projectMatches(project, query) {
         if (!query) return true;
-        return [project.key, project.name, project.url].some(function (value) {
+        return [project.source, project.key, project.name, project.url, project.description].some(function (value) {
           return String(value || '').toLowerCase().indexOf(query) !== -1;
         });
       }
@@ -180,26 +268,29 @@
         projects.forEach(function (project) {
           if (!projectMatches(project, query)) return;
           var key = String(project.key || '');
+          var value = encodeTaskScopeValue(project.source, key);
           var option = document.createElement('div');
-          option.className = 'jira-project-option' + (String(selectedValue).toUpperCase() === key.toUpperCase() ? ' selected' : '');
+          option.className = 'jira-project-option' + (selectedValue === value ? ' selected' : '');
           option.dataset.projectKey = key;
+          option.dataset.scopeValue = value;
           option.title = getProjectLabel(project);
 
           var keyEl = document.createElement('span');
           keyEl.className = 'jira-project-option-key';
-          keyEl.textContent = key || 'Jira';
+          keyEl.textContent = project.source === 'tfs' ? 'TFS' : 'Jira';
           option.appendChild(keyEl);
 
-          if (project.name) {
+          var label = key + (project.name && project.name !== key ? ' • ' + project.name : '');
+          if (label) {
             var nameEl = document.createElement('span');
             nameEl.className = 'jira-project-option-name';
-            nameEl.textContent = project.name;
+            nameEl.textContent = label;
             option.appendChild(nameEl);
           }
 
           option.addEventListener('mousedown', function (event) {
             event.preventDefault();
-            select(this.dataset.projectKey || '');
+            select(this.dataset.scopeValue || '');
           });
           list.appendChild(option);
           shown++;
@@ -208,7 +299,7 @@
         if (shown === 0 && projects.length === 0) {
           var empty = document.createElement('div');
           empty.className = 'jira-project-dropdown-empty';
-          empty.textContent = jira.projectsLoading ? 'Загружаю проекты...' : 'Проекты Jira не загружены';
+          empty.textContent = jira.projectsLoading || tfs.projectsLoading ? 'Загружаю проекты...' : 'Проекты Jira/TFS не загружены';
           list.appendChild(empty);
         } else if (shown === 0 && query) {
           var nothing = document.createElement('div');
@@ -241,8 +332,8 @@
         if (event.key === 'Escape') {
           close();
         } else if (event.key === 'Enter') {
-          var first = list.querySelector('.jira-project-option[data-project-key]');
-          if (first) select(first.dataset.projectKey || '');
+          var first = list.querySelector('.jira-project-option[data-scope-value]');
+          if (first) select(first.dataset.scopeValue || '');
           else if (!searchInput.value.trim()) select('');
         }
       });
@@ -276,6 +367,8 @@
     }
 
     function renderJiraScope() {
+      var selectedScopeValue = getSelectedTaskScopeValue();
+      var scopeOptions = getTaskScopeOptions();
       if (jiraProjectSelectEl) {
         var previous = jiraProjectSelectEl.value;
         jiraProjectSelectEl.innerHTML = '';
@@ -283,37 +376,60 @@
         freeOption.value = '';
         freeOption.textContent = 'Обычный чат';
         jiraProjectSelectEl.appendChild(freeOption);
-        jira.projects.forEach(function (project) {
+
+        var jiraGroup = document.createElement('optgroup');
+        jiraGroup.label = 'Jira';
+        var hasJira = false;
+        scopeOptions.filter(function (project) { return project.source === 'jira'; }).forEach(function (project) {
           var option = document.createElement('option');
-          option.value = project.key || '';
-          option.textContent = (project.key || '') + (project.name ? ' • ' + project.name : '');
-          jiraProjectSelectEl.appendChild(option);
+          option.value = encodeTaskScopeValue('jira', project.key);
+          option.textContent = project.key + (project.name && project.name !== project.key ? ' • ' + project.name : '');
+          jiraGroup.appendChild(option);
+          hasJira = true;
         });
-        jiraProjectSelectEl.value = jira.selectedProjectKey || '';
-        if (jiraProjectSelectEl.value !== (jira.selectedProjectKey || '')) {
-          jiraProjectSelectEl.value = previous && !jira.selectedProjectKey ? previous : '';
+        if (hasJira) jiraProjectSelectEl.appendChild(jiraGroup);
+
+        var tfsGroup = document.createElement('optgroup');
+        tfsGroup.label = 'TFS';
+        var hasTfs = false;
+        scopeOptions.filter(function (project) { return project.source === 'tfs'; }).forEach(function (project) {
+          var option = document.createElement('option');
+          option.value = encodeTaskScopeValue('tfs', project.key);
+          option.textContent = project.key + (project.name && project.name !== project.key ? ' • ' + project.name : '');
+          tfsGroup.appendChild(option);
+          hasTfs = true;
+        });
+        if (hasTfs) jiraProjectSelectEl.appendChild(tfsGroup);
+
+        jiraProjectSelectEl.value = selectedScopeValue;
+        if (jiraProjectSelectEl.value !== selectedScopeValue) {
+          jiraProjectSelectEl.value = previous && !selectedScopeValue ? previous : '';
         }
-        jiraProjectSelectEl.disabled = busy || jira.projectsLoading;
+        jiraProjectSelectEl.disabled = busy || jira.projectsLoading || tfs.projectsLoading;
       }
       if (jiraProjectPicker) {
-        jiraProjectPicker.setProjects(jira.projects);
-        jiraProjectPicker.setValue(jira.selectedProjectKey || '');
-        jiraProjectPicker.setDisabled(busy || jira.projectsLoading);
+        jiraProjectPicker.setProjects(scopeOptions);
+        jiraProjectPicker.setValue(selectedScopeValue);
+        jiraProjectPicker.setDisabled(busy || jira.projectsLoading || tfs.projectsLoading);
       }
 
       if (jiraRefreshBtn) {
-        jiraRefreshBtn.disabled = busy || jira.projectsLoading || jira.tasksLoading;
-        jiraRefreshBtn.textContent = jira.projectsLoading || jira.tasksLoading ? '…' : '↻';
+        var refreshBusy = jira.projectsLoading || jira.tasksLoading || tfs.projectsLoading || tfs.tasksLoading;
+        jiraRefreshBtn.disabled = busy || refreshBusy;
+        jiraRefreshBtn.textContent = refreshBusy ? '…' : '↻';
       }
 
       if (jiraStatusEl) {
-        var text = 'Обычный режим: чаты не связаны с Jira.';
+        var text = 'Обычный режим: чаты не связаны с задачами.';
         var tone = 'idle';
-        if (jira.projectsLoading) {
-          text = 'Проверяю авторизацию Jira и загружаю проекты...';
+        if (jira.projectsLoading || tfs.projectsLoading) {
+          text = 'Проверяю авторизацию Jira/TFS и загружаю проекты...';
           tone = 'loading';
-        } else if (jira.error) {
+        } else if (mode === 'jira' && jira.error) {
           text = jira.error;
+          tone = 'error';
+        } else if (mode === 'tfs' && tfs.error) {
+          text = tfs.error;
           tone = 'error';
         } else if (mode === 'jira') {
           text = jira.tasksLoading
@@ -325,9 +441,25 @@
           } else {
             tone = 'ok';
           }
-        } else if (jira.authOk && jira.authUser) {
-          text = 'Jira авторизована: ' + jira.authUser + '. Выберите проект, чтобы открыть задачи как чаты.';
+        } else if (mode === 'tfs') {
+          text = tfs.tasksLoading
+            ? 'Загружаю work items проекта...'
+            : 'TFS: ' + (tfs.selectedProjectKey || 'проект') + (tfs.authUser ? ' • ' + tfs.authUser : '');
+          if (tfs.tasksError) {
+            text = tfs.tasksError;
+            tone = 'error';
+          } else {
+            tone = 'ok';
+          }
+        } else if ((jira.authOk && jira.authUser) || (tfs.authOk && tfs.authUser)) {
+          var auth = [];
+          if (jira.authOk && jira.authUser) auth.push('Jira: ' + jira.authUser);
+          if (tfs.authOk && tfs.authUser) auth.push('TFS: ' + tfs.authUser);
+          text = auth.join(' • ') + '. Выберите проект, чтобы открыть задачи как чаты.';
           tone = 'ok';
+        } else if (jira.error || tfs.error) {
+          text = [jira.error ? 'Jira: ' + jira.error : '', tfs.error ? 'TFS: ' + tfs.error : ''].filter(Boolean).join(' • ');
+          tone = 'error';
         }
         jiraStatusEl.textContent = text;
         jiraStatusEl.className = 'jira-chat-scope-status is-' + tone;
@@ -359,7 +491,7 @@
 
     function sessionMatchesQuery(session, query) {
       if (!query) return true;
-      var source = session && session.source && session.source.type === 'jira' ? session.source : {};
+      var source = session && session.source && (session.source.type === 'jira' || session.source.type === 'tfs') ? session.source : {};
       return [
         session && session.title,
         session && session.preview,
@@ -367,6 +499,11 @@
         source.issueTitle,
         source.issueStatus,
         source.issueDescription,
+        source.workItemId,
+        source.workItemTitle,
+        source.workItemStatus,
+        source.workItemDescription,
+        source.workItemType,
         source.projectKey,
         source.projectName
       ].some(function (value) {
@@ -375,7 +512,7 @@
     }
 
     function getVisibleSessions() {
-      if (mode !== 'jira') return sessions;
+      if (!isTaskMode()) return sessions;
       var query = normalizeQuery(taskFilter);
       return sessions.filter(function (session) {
         return sessionMatchesQuery(session, query);
@@ -383,8 +520,19 @@
     }
 
     function buildSessionHoverTitle(session) {
-      var source = session && session.source && session.source.type === 'jira' ? session.source : null;
+      var source = session && session.source && (session.source.type === 'jira' || session.source.type === 'tfs') ? session.source : null;
       if (!source) return (session && (session.preview || session.title)) || '';
+      if (source.type === 'tfs') {
+        return [
+          source.workItemId ? 'Work item: #' + source.workItemId : '',
+          source.workItemTitle ? 'Название: ' + source.workItemTitle : '',
+          source.workItemStatus ? 'Статус: ' + source.workItemStatus : '',
+          source.workItemType ? 'Тип: ' + source.workItemType : '',
+          source.projectKey ? 'Проект: ' + source.projectKey + (source.projectName ? ' • ' + source.projectName : '') : '',
+          source.workItemUrl ? 'URL: ' + source.workItemUrl : '',
+          source.workItemDescription ? 'Описание: ' + source.workItemDescription : ''
+        ].filter(Boolean).join('\n');
+      }
       return [
         source.issueKey ? 'Задача: ' + source.issueKey : '',
         source.issueTitle ? 'Название: ' + source.issueTitle : '',
@@ -396,9 +544,12 @@
     }
 
     function getSessionStatus(session) {
-      var status = session && session.source && session.source.type === 'jira'
-        ? String(session.source.issueStatus || '').trim()
-        : '';
+      var status = '';
+      if (session && session.source && session.source.type === 'jira') {
+        status = String(session.source.issueStatus || '').trim();
+      } else if (session && session.source && session.source.type === 'tfs') {
+        status = String(session.source.workItemStatus || '').trim();
+      }
       return status || 'Без статуса';
     }
 
@@ -422,7 +573,8 @@
     function renderSessionItem(session, targetEl) {
       var item = document.createElement('div');
       var isJira = session.source && session.source.type === 'jira';
-      item.className = 'chat-session-chip' + (session.id === activeId ? ' is-active' : '') + (isJira ? ' is-jira' : '');
+      var isTfs = session.source && session.source.type === 'tfs';
+      item.className = 'chat-session-chip' + (session.id === activeId ? ' is-active' : '') + (isJira ? ' is-jira' : '') + (isTfs ? ' is-tfs' : '');
       item.title = buildSessionHoverTitle(session);
 
       var button = document.createElement('button');
@@ -443,6 +595,12 @@
             (session.messageCount || 0) + ' сообщ.',
             formatRelativeTime(session.updatedAt)
           ].filter(Boolean).join(' • ')
+        : isTfs
+        ? [
+            session.source.workItemStatus || session.source.workItemType || 'TFS',
+            (session.messageCount || 0) + ' сообщ.',
+            formatRelativeTime(session.updatedAt)
+          ].filter(Boolean).join(' • ')
         : (session.messageCount || 0) + ' сообщ. • ' + formatRelativeTime(session.updatedAt);
 
       button.appendChild(title);
@@ -454,7 +612,7 @@
 
       item.appendChild(button);
 
-      if (!isJira) {
+      if (!isJira && !isTfs) {
         var deleteBtn = document.createElement('button');
         deleteBtn.type = 'button';
         deleteBtn.className = 'chat-session-delete';
@@ -516,44 +674,51 @@
         if (active.source && active.source.type === 'jira') {
           activeMeta.unshift(active.source.issueKey || 'Jira');
           if (active.source.issueStatus) activeMeta.push(active.source.issueStatus);
+        } else if (active.source && active.source.type === 'tfs') {
+          activeMeta.unshift(active.source.workItemId ? '#' + active.source.workItemId : 'TFS');
+          if (active.source.workItemStatus) activeMeta.push(active.source.workItemStatus);
         }
         var updatedLabel = formatRelativeTime(active.updatedAt);
         if (updatedLabel) activeMeta.push(updatedLabel);
         metaEl.textContent = activeMeta.join(' • ');
       } else {
-        metaEl.textContent = mode === 'jira' ? 'Выберите задачу Jira' : 'Нет сохранённых чатов';
+        metaEl.textContent = mode === 'jira'
+          ? 'Выберите задачу Jira'
+          : mode === 'tfs'
+          ? 'Выберите work item TFS'
+          : 'Нет сохранённых чатов';
       }
 
       if (taskSearchWrapEl) {
-        taskSearchWrapEl.classList.toggle('hidden', mode !== 'jira');
+        taskSearchWrapEl.classList.toggle('hidden', !isTaskMode());
         if (taskSearchInputEl && document.activeElement !== taskSearchInputEl) {
           taskSearchInputEl.value = taskFilter;
         }
         if (taskSearchInputEl) {
-          taskSearchInputEl.disabled = busy || jira.tasksLoading;
+          taskSearchInputEl.disabled = busy || getActiveTaskState().tasksLoading;
           taskSearchInputEl.placeholder = sessions.length
             ? 'Найти задачу по ключу, названию, статусу...'
             : 'Задачи появятся после выбора проекта';
-          taskSearchInputEl.title = mode === 'jira' && taskFilter
+          taskSearchInputEl.title = isTaskMode() && taskFilter
             ? 'Показано ' + visibleSessions.length + ' из ' + sessions.length
-            : 'Поиск по задачам Jira';
+            : 'Поиск по задачам Jira/TFS';
         }
       }
 
       if (visibleSessions.length === 0) {
         var empty = document.createElement('div');
         empty.className = 'chat-session-empty';
-        empty.textContent = mode === 'jira'
+        empty.textContent = isTaskMode()
           ? (taskFilter
               ? 'Задачи по запросу не найдены.'
-              : jira.tasksLoading
+              : getActiveTaskState().tasksLoading
               ? 'Загружаю задачи выбранного проекта...'
-              : (jira.tasksError || 'В выбранном проекте нет ваших задач.'))
+              : (getActiveTaskState().tasksError || 'В выбранном проекте нет ваших задач.'))
           : 'Чаты появятся здесь после первого запуска агента.';
         listEl.appendChild(empty);
       }
 
-      if (mode === 'jira') {
+      if (isTaskMode()) {
         renderJiraSessionGroups(visibleSessions);
       } else {
         visibleSessions.forEach(function (session) {
@@ -562,17 +727,17 @@
       }
 
       if (newBtn) {
-        newBtn.disabled = busy || mode === 'jira';
-        newBtn.textContent = mode === 'jira' ? 'Выберите задачу' : 'Создать чат';
-        newBtn.title = mode === 'jira' ? 'В Jira-режиме чат открывается выбором задачи.' : 'Создать обычный чат';
+        newBtn.disabled = busy || isTaskMode();
+        newBtn.textContent = isTaskMode() ? 'Выберите задачу' : 'Создать чат';
+        newBtn.title = isTaskMode() ? 'В режиме задач чат открывается выбором задачи.' : 'Создать обычный чат';
       }
-      if (quickNewBtn) quickNewBtn.disabled = busy || mode === 'jira';
+      if (quickNewBtn) quickNewBtn.disabled = busy || isTaskMode();
       if (clearBtn) clearBtn.disabled = busy;
       renderJiraScope();
     }
 
     function handleCreateConversation() {
-      if (busy || mode === 'jira') return;
+      if (busy || isTaskMode()) return;
       vscode.postMessage({ type: 'createConversation' });
     }
 
@@ -599,14 +764,15 @@
     if (jiraProjectSelectEl) {
       jiraProjectSelectEl.addEventListener('change', function () {
         if (busy) return;
-        vscode.postMessage({ type: 'selectJiraProject', projectKey: jiraProjectSelectEl.value || '' });
+        var scope = parseTaskScopeValue(jiraProjectSelectEl.value || '');
+        vscode.postMessage({ type: 'selectTaskProject', source: scope.source, projectKey: scope.projectKey });
       });
     }
 
     if (jiraRefreshBtn) {
       jiraRefreshBtn.addEventListener('click', function () {
         if (busy) return;
-        vscode.postMessage({ type: 'refreshJiraProjects' });
+        vscode.postMessage({ type: 'refreshTaskProjects' });
       });
     }
 
@@ -618,12 +784,14 @@
       setSessions: function (message) {
         sessions = Array.isArray(message.sessions) ? message.sessions.slice() : [];
         activeId = message.activeId || '';
-        mode = message.mode === 'jira' ? 'jira' : 'free';
+        mode = message.mode === 'jira' || message.mode === 'tfs' ? message.mode : 'free';
         jira = normalizeJiraState(message.jira);
-        if (lastJiraProjectKey !== jira.selectedProjectKey) {
+        tfs = normalizeTfsState(message.tfs);
+        var nextTaskScopeKey = mode + ':' + (mode === 'tfs' ? tfs.selectedProjectKey : mode === 'jira' ? jira.selectedProjectKey : '');
+        if (lastTaskScopeKey !== nextTaskScopeKey) {
           taskFilter = '';
           if (taskSearchInputEl) taskSearchInputEl.value = '';
-          lastJiraProjectKey = jira.selectedProjectKey;
+          lastTaskScopeKey = nextTaskScopeKey;
         }
         render();
       },

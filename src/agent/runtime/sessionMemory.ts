@@ -1,9 +1,10 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import type { ChatMessage } from '../../core/types';
+import { getExtensionStorageSubdir } from '../../core/extensionStorage';
 import type { AgentRuntimeContext } from './types';
 
-const SESSION_MEMORY_DIR = '.cursorcoder/session-memory';
+const SESSION_MEMORY_DIR = 'session-memory';
 const SESSION_MEMORY_INIT_CHARS = 6_000;
 const SESSION_MEMORY_UPDATE_CHARS = 2_500;
 const SESSION_MEMORY_UPDATE_MESSAGES = 4;
@@ -331,34 +332,24 @@ function createSessionMemoryScopeId(): string {
   return `sm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function getWorkspaceRootPath(): string {
-  try {
-    const mod = require('../worktreeSession') as { getAgentWorkspaceRootPath?: () => string | undefined };
-    const workspaceRoot = mod.getAgentWorkspaceRootPath?.();
-    if (workspaceRoot) return path.resolve(workspaceRoot);
-  } catch {
-    // Outside VS Code we fall back to cwd.
-  }
-  return path.resolve(process.cwd());
-}
-
 function sanitizeScopeId(value: string): string {
   const normalized = String(value || '').trim().replace(/[^a-zA-Z0-9._-]+/g, '-');
   return normalized || createSessionMemoryScopeId();
 }
 
 function getSessionMemoryFilePath(scopeId: string): string {
-  return path.join(getWorkspaceRootPath(), SESSION_MEMORY_DIR, `${sanitizeScopeId(scopeId)}.md`);
+  return path.join(getExtensionStorageSubdir(SESSION_MEMORY_DIR), `${sanitizeScopeId(scopeId)}.md`);
 }
 
 async function ensureSessionMemoryFile(state: AgentSessionMemoryState): Promise<string> {
-  const memoryPath = state.memoryPath || getSessionMemoryFilePath(state.scopeId);
+  const preferredPath = getSessionMemoryFilePath(state.scopeId);
+  const memoryPath = preferredPath;
   await fs.mkdir(path.dirname(memoryPath), { recursive: true });
 
   try {
     await fs.stat(memoryPath);
   } catch {
-    const initialMemory = state.summary
+    let initialMemory = state.summary
       ? buildLegacySeedSessionMemory(state.summary, state.title, state.currentState)
       : buildSessionMemoryTemplate();
     await writeSessionMemoryFile(memoryPath, initialMemory);

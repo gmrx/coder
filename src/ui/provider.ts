@@ -25,7 +25,7 @@ import { AiOriginalContentProvider } from './originalContentProvider';
 import { ApprovalController } from './approvals';
 import { QuestionController } from './questions';
 import type { ExtensionToWebviewMessage, WebviewToExtensionMessage } from './protocol/messages';
-import type { JiraTaskContextViewState } from './protocol/conversations';
+import type { JiraTaskContextViewState, TaskContextViewState, TfsTaskContextViewState } from './protocol/conversations';
 import type { PersistedChatArtifact } from './protocol/artifacts';
 import {
   buildSkippedModelTests,
@@ -45,12 +45,28 @@ import {
   type JiraTaskSummary,
 } from './jiraSettings';
 import {
+  checkTfsSettings,
+  getSavedTfsTaskDetails,
+  listSavedTfsProjectTasks,
+  listSavedTfsProjects,
+  type TfsProjectOption,
+  type TfsTaskDetails,
+  type TfsTaskSummary,
+} from '../core/tfsClient';
+import {
   type SettingsModelIssue,
   type SettingsPanelRequest,
   type SettingsSectionId,
 } from './modelSelectionIssue';
 import { loadMcpSettingsEditorState, saveMcpSettingsEditorState } from './mcpSettings';
 import { getChatViewHtml, getSettingsPanelHtml } from './webviewTemplate';
+import { ClickHouseMetricsService } from '../telemetry/clickhouseMetricsService';
+import {
+  buildChatRunTelemetryEvents,
+  buildExtensionMessageTelemetryEvents,
+  buildUserMessageTelemetryEvent,
+} from '../telemetry/mappers';
+import type { ChatRunTelemetrySignal, TelemetryConversationContext } from '../telemetry/types';
 
 export class AiChatViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'aiAssistant.chatView';
@@ -96,30 +112,43 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
   private jiraRefreshSeq = 0;
   private readonly jiraTaskContexts = new Map<string, JiraTaskContextSnapshot>();
   private readonly jiraTaskContextLoads = new Map<string, Promise<JiraTaskContextSnapshot>>();
+  private selectedTfsProjectKey = '';
+  private tfsProjects: TfsProjectOption[] = [];
+  private tfsProjectTasks = new Map<string, TfsTaskSummary[]>();
+  private tfsAuthOk = false;
+  private tfsAuthUser = '';
+  private tfsError = '';
+  private tfsProjectsLoading = false;
+  private tfsTasksLoading = false;
+  private tfsTasksError = '';
+  private tfsRefreshSeq = 0;
+  private readonly tfsTaskContexts = new Map<string, TfsTaskContextSnapshot>();
+  private readonly tfsTaskContextLoads = new Map<string, Promise<TfsTaskContextSnapshot>>();
 
   constructor(
     private readonly context: vscode.ExtensionContext,
     originalProvider: AiOriginalContentProvider,
+    private readonly metricsService: ClickHouseMetricsService,
   ) {
     this.conversationStore = new ConversationStore(context.workspaceState);
     this.selectedJiraProjectKey = normalizeJiraKey(context.workspaceState.get<string>('aiAssistant.selectedJiraProjectKey') || '');
+    this.selectedTfsProjectKey = normalizeTfsProjectKey(context.workspaceState.get<string>('aiAssistant.selectedTfsProjectKey') || '');
     this.engineStore = new ConversationAgentEngineStore((conversationId, kind) => this.handleEngineRuntimeChanged(conversationId, kind));
     this.checkpointStateStore = new CheckpointStateStore(context);
     this.changeStateStore = new ChangeStateStore(context);
     const activeConversation = this.conversationStore.getActiveConversation();
     this.activeConversationId = activeConversation.id;
-    const initialMessages = activeConversation.source.type === 'jira'
-      ? filterGeneratedJiraContextChatMessages(activeConversation.messages, activeConversation.source.issueKey)
-      : activeConversation.messages;
-    const initialArtifacts = activeConversation.source.type === 'jira'
-      ? filterJiraContextStatusArtifacts(activeConversation.artifactEvents, activeConversation.source.issueKey)
-      : activeConversation.artifactEvents;
+    const initialMessages = filterGeneratedTaskContextChatMessages(activeConversation);
+    const initialArtifacts = filterTaskContextStatusArtifacts(activeConversation);
     this.chatHistory.push(...initialMessages);
     this.chatArtifacts = Array.isArray(initialArtifacts)
       ? initialArtifacts.map((artifact) => clonePersistedArtifact(artifact))
       : [];
-    if (initialMessages.length !== activeConversation.messages.length) {
+    if (initialMessages.length !== activeConversation.messages.length && activeConversation.source.type === 'jira') {
       void this.conversationStore.removeGeneratedJiraContextMessages(activeConversation.id);
+    }
+    if (initialMessages.length !== activeConversation.messages.length && activeConversation.source.type === 'tfs') {
+      void this.conversationStore.removeGeneratedTfsContextMessages(activeConversation.id);
     }
     this.activeEngine = this.engineStore.getOrCreate(activeConversation.id, initialMessages, activeConversation.agentRuntime);
     const appliedInitialWorktree = applyWorktreeSession(activeConversation.agentRuntime?.worktreeSession || null);
@@ -174,6 +203,7 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
       cancelQuestion: (confirmId, reason) => this.questionController.cancel(confirmId, reason),
       persistConversation: () => this.persistActiveConversation(),
       openSettingsPanel: (request) => this.openSettingsPanel(request),
+      recordTelemetry: (signal) => this.recordChatRunTelemetry(signal),
     });
 
     this.chatRunController.restoreConversationState({
@@ -269,6 +299,7 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
         const text = (message.text as string).trim();
         if (text && !this.chatRunController.isRunning()) {
           this.commitRevertBranchIfNeeded();
+          this.recordUserMessageTelemetry();
           await this.chatRunController.handleUserMessage(text);
         }
         return;
@@ -291,6 +322,7 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
         this.sendActiveConversationState(false);
         this.sendComposerPermissionsState();
         void this.refreshJiraConversationProjects();
+        void this.refreshTfsConversationProjects();
         await this.sendTasksState();
         return;
       case 'getConversationSessions':
@@ -311,14 +343,29 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
       case 'clearConversation':
         await this.handleClearConversation();
         return;
+      case 'refreshTaskProjects':
+        await Promise.all([
+          this.refreshJiraConversationProjects({ force: true }),
+          this.refreshTfsConversationProjects({ force: true }),
+        ]);
+        return;
       case 'refreshJiraProjects':
         await this.refreshJiraConversationProjects({ force: true });
+        return;
+      case 'refreshTfsProjects':
+        await this.refreshTfsConversationProjects({ force: true });
+        return;
+      case 'selectTaskProject':
+        await this.handleSelectTaskProject(message.source || 'free', message.projectKey || '');
         return;
       case 'selectJiraProject':
         await this.handleSelectJiraProject(message.projectKey || '');
         return;
+      case 'selectTfsProject':
+        await this.handleSelectTfsProject(message.projectKey || '');
+        return;
       case 'saveSettings':
-        await this.handleSaveSettings(message.data || {});
+        await this.handleSaveSettings(message.data || {}, { silent: message.silent === true });
         return;
       case 'saveComposerPermissions':
         await this.handleSaveComposerPermissions(message.autoApproval);
@@ -331,6 +378,9 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'checkJira':
         await this.handleCheckJira(message.data || {});
+        return;
+      case 'checkTfs':
+        await this.handleCheckTfs(message.data || {});
         return;
       case 'inspectMcp':
         await this.handleInspectMcp(message.data || {});
@@ -507,8 +557,19 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private async handleSaveSettings(data: SettingsPayload) {
+  private async handleSaveSettings(data: SettingsPayload, options: { silent?: boolean } = {}) {
     const config = normalizeSettingsPayload(data);
+    const silent = options.silent === true;
+    const previous = readConfig();
+    const jiraSettingsChanged =
+      previous.jiraBaseUrl !== config.jiraBaseUrl ||
+      previous.jiraUsername !== config.jiraUsername ||
+      previous.jiraPassword !== config.jiraPassword;
+    const tfsSettingsChanged =
+      previous.tfsBaseUrl !== config.tfsBaseUrl ||
+      previous.tfsCollection !== config.tfsCollection ||
+      previous.tfsUsername !== config.tfsUsername ||
+      previous.tfsPassword !== config.tfsPassword;
 
     try {
       await saveConfig({
@@ -521,36 +582,44 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
         jiraBaseUrl: config.jiraBaseUrl,
         jiraUsername: config.jiraUsername,
         jiraPassword: config.jiraPassword,
+        tfsBaseUrl: config.tfsBaseUrl,
+        tfsCollection: config.tfsCollection,
+        tfsUsername: config.tfsUsername,
+        tfsPassword: config.tfsPassword,
         mcpDisabledTools: config.mcpDisabledTools,
         mcpTrustedTools: config.mcpTrustedTools,
         webTrustedHosts: config.webTrustedHosts,
         webBlockedHosts: config.webBlockedHosts,
       });
-      const savedMcp = await saveMcpSettingsEditorState({
+      await saveMcpSettingsEditorState({
         mcpConfigPath: config.mcpConfigPath,
         mcpServers: config.mcpServers,
       });
       const saved = readConfig();
       if (saved.apiBaseUrl === config.apiBaseUrl && saved.model === config.model) {
         this.resetAgentEngines();
-        vscode.window.showInformationMessage(`${EXTENSION_NAME}: настройки сохранены (chat=${config.model || '—'}).`);
-        this.postSettings({
-          type: 'settingsSaved',
-          ...(savedMcp.savedPath ? { mcpSavedPath: savedMcp.savedPath, mcpCreatedFile: savedMcp.created } : {}),
-        });
-        void this.refreshJiraConversationProjects({ force: true });
+        if (!silent) {
+          vscode.window.showInformationMessage(`${EXTENSION_NAME}: настройки сохранены (chat=${config.model || '—'}).`);
+        }
+        this.postSettings({ type: 'settingsSaved', ok: true, silent });
+        if (jiraSettingsChanged) void this.refreshJiraConversationProjects({ force: true });
+        if (tfsSettingsChanged) void this.refreshTfsConversationProjects({ force: true });
         return;
       }
 
       const message = `Не удалось сохранить: "${saved.model}" != "${config.model}"`;
-      vscode.window.showErrorMessage(`${EXTENSION_NAME}: ${message}`);
-      this.postSettings({ type: 'error', text: message });
-      this.postSettings({ type: 'settingsSaved' });
+      if (!silent) {
+        vscode.window.showErrorMessage(`${EXTENSION_NAME}: ${message}`);
+        this.postSettings({ type: 'error', text: message });
+      }
+      this.postSettings({ type: 'settingsSaved', ok: false, error: message, silent });
     } catch (error: any) {
       const message = `Ошибка: ${error?.message || error}`;
-      vscode.window.showErrorMessage(`${EXTENSION_NAME}: ${message}`);
-      this.postSettings({ type: 'error', text: message });
-      this.postSettings({ type: 'settingsSaved' });
+      if (!silent) {
+        vscode.window.showErrorMessage(`${EXTENSION_NAME}: ${message}`);
+        this.postSettings({ type: 'error', text: message });
+      }
+      this.postSettings({ type: 'settingsSaved', ok: false, error: message, silent });
     }
   }
 
@@ -641,6 +710,13 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
+  private async handleCheckTfs(data: SettingsPayload) {
+    this.postSettings({
+      type: 'tfsCheckResult',
+      ...(await checkTfsSettings(data)),
+    });
+  }
+
   private async handleInspectMcp(data: SettingsPayload) {
     try {
       const config = normalizeSettingsPayload(data);
@@ -669,6 +745,7 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private post(message: ExtensionToWebviewMessage) {
+    this.recordMessageTelemetry(message);
     this.recordArtifactMessage(message);
     if (shouldPersistChangeState(message)) {
       this.scheduleChangeStatePersist();
@@ -696,15 +773,18 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private sendConversationSessions() {
-    const jiraMode = !!this.selectedJiraProjectKey;
+    const mode = this.getConversationScopeMode();
     this.post({
       type: 'conversationSessions',
       activeId: this.getSessionListActiveId(),
-      sessions: jiraMode
+      sessions: mode === 'jira'
         ? this.buildJiraConversationSummaries()
-        : this.conversationStore.listSummaries({ type: 'free' }),
-      mode: jiraMode ? 'jira' : 'free',
+        : mode === 'tfs'
+          ? this.buildTfsConversationSummaries()
+          : this.conversationStore.listSummaries({ type: 'free' }),
+      mode,
       jira: this.buildJiraConversationScopeState(),
+      tfs: this.buildTfsConversationScopeState(),
     });
   }
 
@@ -713,18 +793,19 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
     const runtime = this.activeEngine.snapshotRuntime();
     const config = readConfig();
     const pendingChangeIds = Array.from(this.changeController.getPendingChanges().keys());
-    const messages = active.source.type === 'jira'
-      ? filterGeneratedJiraContextChatMessages(active.messages, active.source.issueKey)
-      : active.messages;
-    const artifactEvents = active.source.type === 'jira'
-      ? filterJiraContextStatusArtifacts(active.artifactEvents, active.source.issueKey)
-      : active.artifactEvents;
+    const messages = filterGeneratedTaskContextChatMessages(active);
+    const artifactEvents = filterTaskContextStatusArtifacts(active);
+    const taskContext = this.buildTaskContextView(active.source);
+    const jiraContext = taskContext?.system === 'jira' ? taskContext as JiraTaskContextViewState : null;
+    const tfsContext = taskContext?.system === 'tfs' ? taskContext as TfsTaskContextViewState : null;
     this.post({
       type: 'conversationState',
       sessionId: active.id,
       title: active.title,
       source: active.source,
-      jiraContext: this.buildJiraContextView(active.source),
+      taskContext,
+      jiraContext,
+      tfsContext,
       replace,
       messages: messages.map((message) => ({ role: message.role, content: message.content })),
       suggestions: active.suggestions,
@@ -747,13 +828,26 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
 
   private getSessionListActiveId(): string {
     const active = this.conversationStore.getActiveConversation();
-    if (!this.selectedJiraProjectKey) {
+    const mode = this.getConversationScopeMode();
+    if (mode === 'free') {
       return active.source.type === 'free' ? active.id : '';
     }
-    return active.source.type === 'jira'
-      && normalizeJiraKey(active.source.projectKey) === this.selectedJiraProjectKey
+    if (mode === 'jira') {
+      return active.source.type === 'jira'
+        && normalizeJiraKey(active.source.projectKey) === this.selectedJiraProjectKey
+        ? active.id
+        : '';
+    }
+    return active.source.type === 'tfs'
+      && normalizeTfsProjectComparable(active.source.projectKey) === normalizeTfsProjectComparable(this.selectedTfsProjectKey)
       ? active.id
       : '';
+  }
+
+  private getConversationScopeMode(): 'free' | 'jira' | 'tfs' {
+    if (this.selectedTfsProjectKey) return 'tfs';
+    if (this.selectedJiraProjectKey) return 'jira';
+    return 'free';
   }
 
   private buildJiraConversationScopeState() {
@@ -768,6 +862,21 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
       tasksLoading: this.jiraTasksLoading,
       tasksError: this.jiraTasksError,
       projects: this.jiraProjects.map((project) => ({ ...project })),
+    };
+  }
+
+  private buildTfsConversationScopeState() {
+    const selectedProject = this.getSelectedTfsProject();
+    return {
+      selectedProjectKey: this.selectedTfsProjectKey,
+      selectedProjectName: selectedProject?.name || '',
+      authOk: this.tfsAuthOk,
+      authUser: this.tfsAuthUser,
+      error: this.tfsError,
+      projectsLoading: this.tfsProjectsLoading,
+      tasksLoading: this.tfsTasksLoading,
+      tasksError: this.tfsTasksError,
+      projects: this.tfsProjects.map((project) => ({ ...project })),
     };
   }
 
@@ -789,10 +898,36 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
+  private buildTfsConversationSummaries(): ConversationSummaryDto[] {
+    const selectedProject = this.getSelectedTfsProject();
+    const tasks = this.tfsProjectTasks.get(this.selectedTfsProjectKey) || [];
+    return tasks.map((task) => {
+      const existing = this.conversationStore.findTfsConversation(task.id || task.key);
+      const source = this.buildTfsConversationSource(task, selectedProject);
+      return {
+        id: existing?.id || buildVirtualTfsConversationId(this.selectedTfsProjectKey, task.id || task.key),
+        title: `#${task.id || task.key} • ${task.title || 'Work item TFS'}`,
+        source,
+        updatedAt: existing?.updatedAt || task.updatedAt || Date.now(),
+        messageCount: existing?.messages.length || 0,
+        preview: existing ? buildConversationPreview(existing.messages) : (task.description || task.url || 'Work item TFS'),
+        ...(existing ? {} : { virtual: true }),
+      };
+    });
+  }
+
   private getSelectedJiraProject(): JiraProjectOption | null {
     const key = this.selectedJiraProjectKey;
     if (!key) return null;
     return this.jiraProjects.find((project) => normalizeJiraKey(project.key) === key) || null;
+  }
+
+  private getSelectedTfsProject(): TfsProjectOption | null {
+    const key = this.selectedTfsProjectKey;
+    if (!key) return null;
+    return this.tfsProjects.find((project) =>
+      normalizeTfsProjectComparable(project.key || project.name) === normalizeTfsProjectComparable(key),
+    ) || null;
   }
 
   private buildJiraConversationSource(task: JiraTaskSummary, project: JiraProjectOption | null): ConversationSource {
@@ -807,6 +942,27 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
       issueStatus: task.status || '',
       issueDescription: task.description || '',
     };
+  }
+
+  private buildTfsConversationSource(task: TfsTaskSummary, project: TfsProjectOption | null): ConversationSource {
+    const projectKey = normalizeTfsProjectKey(project?.key || project?.name || this.selectedTfsProjectKey || task.projectName);
+    return {
+      type: 'tfs',
+      projectKey,
+      projectName: project?.name || task.projectName || projectKey,
+      workItemId: normalizeTfsWorkItemId(task.id || task.key),
+      workItemTitle: task.title || `#${task.id || task.key}`,
+      workItemUrl: task.url || '',
+      workItemStatus: task.status || '',
+      workItemDescription: task.description || '',
+      workItemType: task.type || '',
+    };
+  }
+
+  private buildTaskContextView(source: ConversationSource): TaskContextViewState | null {
+    if (source.type === 'jira') return this.buildJiraContextView(source);
+    if (source.type === 'tfs') return this.buildTfsContextView(source);
+    return null;
   }
 
   private buildJiraContextView(source: ConversationSource): JiraTaskContextViewState | null {
@@ -827,6 +983,7 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
 
     const commits = context ? buildJiraCommitViews(context.git, source.issueKey) : [];
     return {
+      system: 'jira',
       issueKey: source.issueKey,
       title: context?.source.issueTitle || source.issueTitle,
       project: `${context?.source.projectKey || source.projectKey}${(context?.source.projectName || source.projectName) ? ` • ${context?.source.projectName || source.projectName}` : ''}`,
@@ -843,14 +1000,58 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
     };
   }
 
+  private buildTfsContextView(source: ConversationSource): TfsTaskContextViewState | null {
+    if (source.type !== 'tfs') return null;
+    const key = normalizeTfsWorkItemId(source.workItemId);
+    const context = this.tfsTaskContexts.get(key) || null;
+    const loading = this.tfsTaskContextLoads.has(key);
+    const details = context?.details || null;
+    const meta = [
+      details?.type ? `Тип: ${details.type}` : source.workItemType ? `Тип: ${source.workItemType}` : '',
+      details?.priority ? `Приоритет: ${details.priority}` : '',
+      details?.severity ? `Severity: ${details.severity}` : '',
+      details?.assignedTo ? `Исполнитель: ${details.assignedTo}` : '',
+      details?.createdBy ? `Автор: ${details.createdBy}` : '',
+      details?.updated ? `Обновлена: ${details.updated}` : '',
+    ].filter(Boolean);
+
+    const commits = context ? buildJiraCommitViews(context.git, buildTfsBranchNameKey(source)) : [];
+    return {
+      system: 'tfs',
+      issueKey: `#${source.workItemId}`,
+      workItemId: source.workItemId,
+      workItemType: context?.source.workItemType || source.workItemType,
+      title: context?.source.workItemTitle || source.workItemTitle,
+      project: `${context?.source.projectKey || source.projectKey}${(context?.source.projectName || source.projectName) ? ` • ${context?.source.projectName || source.projectName}` : ''}`,
+      status: context?.source.workItemStatus || source.workItemStatus,
+      url: context?.source.workItemUrl || source.workItemUrl,
+      description: context?.source.workItemDescription || source.workItemDescription,
+      updatedAt: context?.updatedAt || 0,
+      loading,
+      error: context?.detailError || context?.git.error || '',
+      meta,
+      sections: buildTfsContextViewSections(details),
+      repositoriesChecked: context?.git.repositories.length || 0,
+      commits,
+    };
+  }
+
   private async getActiveConversationContext(): Promise<string> {
     const active = this.conversationStore.getActiveConversation();
     const source = active.source;
-    if (source.type !== 'jira') return '';
-    this.stripGeneratedJiraContextFromActiveHistory(source.issueKey);
-    this.stripJiraContextStatusArtifacts(source.issueKey);
-    const context = await this.getJiraTaskContext(active, { allowCached: true });
-    return buildJiraTaskExternalContext(context);
+    if (source.type === 'jira') {
+      this.stripGeneratedJiraContextFromActiveHistory(source.issueKey);
+      this.stripJiraContextStatusArtifacts(source.issueKey);
+      const context = await this.getJiraTaskContext(active, { allowCached: true });
+      return buildJiraTaskExternalContext(context);
+    }
+    if (source.type === 'tfs') {
+      this.stripGeneratedTfsContextFromActiveHistory(source.workItemId);
+      this.stripTfsContextStatusArtifacts(source.workItemId);
+      const context = await this.getTfsTaskContext(active, { allowCached: true });
+      return buildTfsTaskExternalContext(context);
+    }
+    return '';
   }
 
   private stripGeneratedJiraContextFromActiveHistory(issueKey: string): void {
@@ -867,6 +1068,26 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
     const key = normalizeJiraKey(issueKey);
     const nextArtifacts = this.chatArtifacts.filter((artifact) =>
       !isGeneratedJiraContextStatusArtifact(artifact, key),
+    );
+    if (nextArtifacts.length === this.chatArtifacts.length) return;
+    this.chatArtifacts = nextArtifacts;
+    this.scheduleArtifactPersist();
+  }
+
+  private stripGeneratedTfsContextFromActiveHistory(workItemId: string): void {
+    const nextHistory = this.chatHistory.filter((message) =>
+      !isGeneratedTfsContextChatMessage(message, workItemId),
+    );
+    if (nextHistory.length === this.chatHistory.length) return;
+    this.chatHistory.splice(0, this.chatHistory.length, ...nextHistory);
+    this.syncActiveConversationEngine();
+    void this.persistActiveConversation();
+  }
+
+  private stripTfsContextStatusArtifacts(workItemId: string): void {
+    const key = normalizeTfsWorkItemId(workItemId);
+    const nextArtifacts = this.chatArtifacts.filter((artifact) =>
+      !isGeneratedTfsContextStatusArtifact(artifact, key),
     );
     if (nextArtifacts.length === this.chatArtifacts.length) return;
     this.chatArtifacts = nextArtifacts;
@@ -891,8 +1112,9 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
 
   private async handleCreateConversation() {
     if (!this.canSwitchConversation()) return;
-    if (this.selectedJiraProjectKey) {
-      this.post({ type: 'error', text: 'В Jira-проекте чат создаётся выбором задачи из списка. Чтобы создать обычный чат, выберите режим "Обычный чат".' });
+    const mode = this.getConversationScopeMode();
+    if (mode === 'jira' || mode === 'tfs') {
+      this.post({ type: 'error', text: 'В режиме задач чат создаётся выбором задачи из списка. Чтобы создать обычный чат, выберите режим "Обычный чат".' });
       return;
     }
     await this.persistActiveConversation();
@@ -905,6 +1127,11 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
     const virtualJira = parseVirtualJiraConversationId(conversationId);
     if (virtualJira) {
       await this.openJiraTaskConversation(virtualJira.issueKey);
+      return;
+    }
+    const virtualTfs = parseVirtualTfsConversationId(conversationId);
+    if (virtualTfs) {
+      await this.openTfsTaskConversation(virtualTfs.workItemId);
       return;
     }
     await this.persistActiveConversation();
@@ -921,6 +1148,16 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
         this.stripJiraContextStatusArtifacts(nextConversation.source.issueKey);
       }
       void this.refreshJiraTaskContext(nextConversation, { force: true });
+      return;
+    }
+    if (conversation.source.type === 'tfs') {
+      const cleaned = await this.conversationStore.removeGeneratedTfsContextMessages(conversation.id);
+      const nextConversation = cleaned || conversation;
+      this.activateConversation(nextConversation);
+      if (nextConversation.source.type === 'tfs') {
+        this.stripTfsContextStatusArtifacts(nextConversation.source.workItemId);
+      }
+      void this.refreshTfsTaskContext(nextConversation, { force: true });
       return;
     }
     this.activateConversation(conversation);
@@ -953,6 +1190,33 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
     void this.refreshJiraTaskContext(created, { force: true });
   }
 
+  private async openTfsTaskConversation(workItemId: string | number) {
+    const key = normalizeTfsWorkItemId(workItemId);
+    if (!key) return;
+    await this.persistActiveConversation();
+    const existing = this.conversationStore.findTfsConversation(key);
+    if (existing) {
+      const cleaned = await this.conversationStore.removeGeneratedTfsContextMessages(existing.id);
+      const conversation = await this.conversationStore.switchConversation(cleaned?.id || existing.id);
+      if (conversation) {
+        this.activateConversation(conversation);
+        this.stripTfsContextStatusArtifacts(conversation.source.type === 'tfs' ? conversation.source.workItemId : key);
+        void this.refreshTfsTaskContext(conversation, { force: true });
+      }
+      return;
+    }
+
+    const task = this.findCachedTfsTask(key);
+    if (!task) {
+      this.post({ type: 'error', text: `Work item TFS #${key} не найден в текущем списке проекта.` });
+      return;
+    }
+    const created = await this.conversationStore.createConversation(this.buildTfsConversationSource(task, this.getSelectedTfsProject()));
+    this.activateConversation(created);
+    this.stripTfsContextStatusArtifacts(created.source.type === 'tfs' ? created.source.workItemId : key);
+    void this.refreshTfsTaskContext(created, { force: true });
+  }
+
   private async loadJiraTaskContext(source: Extract<ConversationSource, { type: 'jira' }>): Promise<{
     source: Extract<ConversationSource, { type: 'jira' }>;
     details: JiraTaskDetails | null;
@@ -973,6 +1237,32 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
       issueUrl: task.url || source.issueUrl,
       issueStatus: task.status || source.issueStatus,
       issueDescription: task.description || source.issueDescription,
+    };
+    return { source: nextSource, details: task, error: '' };
+  }
+
+  private async loadTfsTaskContext(source: Extract<ConversationSource, { type: 'tfs' }>): Promise<{
+    source: Extract<ConversationSource, { type: 'tfs' }>;
+    details: TfsTaskDetails | null;
+    error: string;
+  }> {
+    const result = await getSavedTfsTaskDetails(source.workItemId);
+    if (!result.ok || !result.task) {
+      return { source, details: null, error: result.error };
+    }
+
+    const task = result.task;
+    const projectKey = normalizeTfsProjectKey(task.projectName || source.projectKey);
+    const nextSource: Extract<ConversationSource, { type: 'tfs' }> = {
+      type: 'tfs',
+      projectKey,
+      projectName: task.projectName || source.projectName || projectKey,
+      workItemId: normalizeTfsWorkItemId(task.id || source.workItemId),
+      workItemTitle: task.title || source.workItemTitle,
+      workItemUrl: task.url || source.workItemUrl,
+      workItemStatus: task.status || source.workItemStatus,
+      workItemDescription: task.description || source.workItemDescription,
+      workItemType: task.type || source.workItemType,
     };
     return { source: nextSource, details: task, error: '' };
   }
@@ -1060,6 +1350,89 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private async getTfsTaskContext(
+    conversation: StoredConversationSession,
+    options: { allowCached?: boolean; force?: boolean } = {},
+  ): Promise<TfsTaskContextSnapshot> {
+    if (conversation.source.type !== 'tfs') {
+      return buildFallbackTfsTaskContext({ type: 'tfs', projectKey: '', projectName: '', workItemId: '', workItemTitle: '', workItemUrl: '', workItemStatus: '', workItemDescription: '', workItemType: '' });
+    }
+
+    const key = normalizeTfsWorkItemId(conversation.source.workItemId);
+    const cached = this.tfsTaskContexts.get(key);
+    const cacheFresh = cached && Date.now() - cached.updatedAt < JIRA_TASK_CONTEXT_TTL_MS;
+    if (options.allowCached && cacheFresh && !options.force) {
+      return cached;
+    }
+
+    return await this.refreshTfsTaskContext(conversation, { force: options.force || !cached });
+  }
+
+  private async refreshTfsTaskContext(
+    conversation: StoredConversationSession,
+    options: { force?: boolean } = {},
+  ): Promise<TfsTaskContextSnapshot> {
+    if (conversation.source.type !== 'tfs') {
+      return buildFallbackTfsTaskContext({ type: 'tfs', projectKey: '', projectName: '', workItemId: '', workItemTitle: '', workItemUrl: '', workItemStatus: '', workItemDescription: '', workItemType: '' });
+    }
+
+    const key = normalizeTfsWorkItemId(conversation.source.workItemId);
+    const cached = this.tfsTaskContexts.get(key);
+    const ageMs = cached ? Date.now() - cached.updatedAt : Number.POSITIVE_INFINITY;
+    if (cached && (!options.force || ageMs < JIRA_TASK_CONTEXT_FORCE_DEBOUNCE_MS) && ageMs < JIRA_TASK_CONTEXT_TTL_MS) {
+      return cached;
+    }
+
+    const existingLoad = this.tfsTaskContextLoads.get(key);
+    if (existingLoad) return await existingLoad;
+
+    const load = this.loadTfsTaskContextSnapshot(conversation.source);
+    this.tfsTaskContextLoads.set(key, load);
+    if (conversation.id === this.activeConversationId) {
+      this.sendActiveConversationState(false);
+    }
+    try {
+      const context = await load;
+      this.tfsTaskContexts.set(key, context);
+      const updated = await this.conversationStore.updateConversationSource(conversation.id, context.source);
+      if (updated && conversation.id === this.activeConversationId) {
+        this.sendConversationSessions();
+        this.sendActiveConversationState(false);
+      } else {
+        this.sendConversationSessions();
+      }
+      return context;
+    } finally {
+      this.tfsTaskContextLoads.delete(key);
+    }
+  }
+
+  private async loadTfsTaskContextSnapshot(source: Extract<ConversationSource, { type: 'tfs' }>): Promise<TfsTaskContextSnapshot> {
+    try {
+      const taskContext = await this.loadTfsTaskContext(source);
+      const gitContext = await readIssueGitContext(buildTfsGitSearchKey(taskContext.source), this.getGitSearchRoots());
+      return {
+        source: taskContext.source,
+        details: taskContext.details,
+        detailError: taskContext.error,
+        git: gitContext,
+        updatedAt: Date.now(),
+      };
+    } catch (error: any) {
+      return {
+        source,
+        details: null,
+        detailError: formatTaskContextError(error),
+        git: {
+          searchRoots: this.getGitSearchRoots(),
+          repositories: [],
+          error: formatTaskContextError(error),
+        },
+        updatedAt: Date.now(),
+      };
+    }
+  }
+
   private getGitSearchRoots(): string[] {
     const roots = new Set<string>();
     for (const folder of vscode.workspace.workspaceFolders || []) {
@@ -1085,6 +1458,10 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
     if (!conversationId) return;
     if (parseVirtualJiraConversationId(conversationId)) {
       this.post({ type: 'status', text: 'Задача Jira остаётся в списке. Истории чата для неё пока нет.' });
+      return;
+    }
+    if (parseVirtualTfsConversationId(conversationId)) {
+      this.post({ type: 'status', text: 'Work item TFS остаётся в списке. Истории чата для него пока нет.' });
       return;
     }
     const deletingActive = conversationId === this.conversationStore.getActiveId();
@@ -1117,16 +1494,74 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
     this.selectedJiraProjectKey = nextKey;
     this.jiraTasksError = '';
     await this.context.workspaceState.update('aiAssistant.selectedJiraProjectKey', nextKey || undefined);
+    if (nextKey) {
+      this.selectedTfsProjectKey = '';
+      this.tfsTasksError = '';
+      this.tfsTasksLoading = false;
+      await this.context.workspaceState.update('aiAssistant.selectedTfsProjectKey', undefined);
+    }
 
     if (!nextKey) {
       this.jiraTasksLoading = false;
-      await this.ensureFreeConversationActive();
+      if (!this.selectedTfsProjectKey) {
+        await this.ensureFreeConversationActive();
+      }
       this.sendConversationSessions();
       return;
     }
 
     this.sendConversationSessions();
     await this.refreshJiraConversationProjects({ force: false, openFirstTask: true });
+  }
+
+  private async handleSelectTfsProject(projectKey: string) {
+    if (!this.canSwitchConversation()) return;
+    await this.persistActiveConversation();
+    const nextKey = normalizeTfsProjectKey(projectKey);
+    this.selectedTfsProjectKey = nextKey;
+    this.tfsTasksError = '';
+    await this.context.workspaceState.update('aiAssistant.selectedTfsProjectKey', nextKey || undefined);
+    if (nextKey) {
+      this.selectedJiraProjectKey = '';
+      this.jiraTasksError = '';
+      this.jiraTasksLoading = false;
+      await this.context.workspaceState.update('aiAssistant.selectedJiraProjectKey', undefined);
+    }
+
+    if (!nextKey) {
+      this.tfsTasksLoading = false;
+      if (!this.selectedJiraProjectKey) {
+        await this.ensureFreeConversationActive();
+      }
+      this.sendConversationSessions();
+      return;
+    }
+
+    this.sendConversationSessions();
+    await this.refreshTfsConversationProjects({ force: false, openFirstTask: true });
+  }
+
+  private async handleSelectTaskProject(source: 'free' | 'jira' | 'tfs', projectKey: string) {
+    if (source === 'jira') {
+      await this.handleSelectJiraProject(projectKey);
+      return;
+    }
+    if (source === 'tfs') {
+      await this.handleSelectTfsProject(projectKey);
+      return;
+    }
+    if (!this.canSwitchConversation()) return;
+    await this.persistActiveConversation();
+    this.selectedJiraProjectKey = '';
+    this.selectedTfsProjectKey = '';
+    this.jiraTasksLoading = false;
+    this.tfsTasksLoading = false;
+    this.jiraTasksError = '';
+    this.tfsTasksError = '';
+    await this.context.workspaceState.update('aiAssistant.selectedJiraProjectKey', undefined);
+    await this.context.workspaceState.update('aiAssistant.selectedTfsProjectKey', undefined);
+    await this.ensureFreeConversationActive();
+    this.sendConversationSessions();
   }
 
   private async ensureFreeConversationActive() {
@@ -1168,10 +1603,41 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private async ensureTfsConversationActive(openFirstTask: boolean) {
+    if (!this.selectedTfsProjectKey) return;
+    const active = this.conversationStore.getActiveConversation();
+    if (
+      active.source.type === 'tfs'
+      && normalizeTfsProjectComparable(active.source.projectKey) === normalizeTfsProjectComparable(this.selectedTfsProjectKey)
+    ) {
+      const cleaned = await this.conversationStore.removeGeneratedTfsContextMessages(active.id);
+      const nextActive = cleaned || active;
+      this.activateConversation(nextActive);
+      if (nextActive.source.type === 'tfs') {
+        this.stripTfsContextStatusArtifacts(nextActive.source.workItemId);
+      }
+      void this.refreshTfsTaskContext(nextActive, { force: false });
+      return;
+    }
+    if (!openFirstTask) return;
+    const firstTask = (this.tfsProjectTasks.get(this.selectedTfsProjectKey) || [])[0];
+    if (firstTask) {
+      await this.openTfsTaskConversation(firstTask.id || firstTask.key);
+    }
+  }
+
   private findCachedJiraTask(issueKey: string): JiraTaskSummary | null {
     const key = normalizeJiraKey(issueKey);
     for (const task of this.jiraProjectTasks.get(this.selectedJiraProjectKey) || []) {
       if (normalizeJiraKey(task.key) === key) return task;
+    }
+    return null;
+  }
+
+  private findCachedTfsTask(workItemId: string | number): TfsTaskSummary | null {
+    const key = normalizeTfsWorkItemId(workItemId);
+    for (const task of this.tfsProjectTasks.get(this.selectedTfsProjectKey) || []) {
+      if (normalizeTfsWorkItemId(task.id || task.key) === key) return task;
     }
     return null;
   }
@@ -1239,6 +1705,71 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private async refreshTfsConversationProjects(options: { force?: boolean; openFirstTask?: boolean } = {}) {
+    if (this.tfsProjectsLoading && !options.force) return;
+    const seq = ++this.tfsRefreshSeq;
+    this.tfsProjectsLoading = true;
+    this.tfsError = '';
+    this.sendConversationSessions();
+
+    const result = await listSavedTfsProjects();
+    if (seq !== this.tfsRefreshSeq) return;
+
+    this.tfsProjectsLoading = false;
+    this.tfsAuthOk = result.ok;
+    this.tfsAuthUser = result.authUser || '';
+    this.tfsError = result.ok ? '' : result.error;
+    this.tfsProjects = result.projects || [];
+
+    if (this.selectedTfsProjectKey && !result.ok) {
+      this.selectedTfsProjectKey = '';
+      await this.context.workspaceState.update('aiAssistant.selectedTfsProjectKey', undefined);
+      await this.ensureFreeConversationActive();
+    }
+
+    if (this.selectedTfsProjectKey && !this.tfsProjects.some((project) =>
+      normalizeTfsProjectComparable(project.key || project.name) === normalizeTfsProjectComparable(this.selectedTfsProjectKey)
+    )) {
+      this.selectedTfsProjectKey = '';
+      await this.context.workspaceState.update('aiAssistant.selectedTfsProjectKey', undefined);
+      await this.ensureFreeConversationActive();
+    }
+
+    this.sendConversationSessions();
+    if (this.selectedTfsProjectKey && result.ok) {
+      await this.refreshSelectedTfsProjectTasks({ openFirstTask: !!options.openFirstTask });
+      return;
+    }
+
+    if (!this.selectedTfsProjectKey) {
+      this.tfsTasksLoading = false;
+      this.tfsTasksError = '';
+    }
+    this.sendConversationSessions();
+  }
+
+  private async refreshSelectedTfsProjectTasks(options: { openFirstTask?: boolean } = {}) {
+    const projectKey = this.selectedTfsProjectKey;
+    if (!projectKey) return;
+    this.tfsTasksLoading = true;
+    this.tfsTasksError = '';
+    this.sendConversationSessions();
+
+    const result = await listSavedTfsProjectTasks(projectKey, 100);
+    if (normalizeTfsProjectComparable(result.projectKey) !== normalizeTfsProjectComparable(this.selectedTfsProjectKey)) return;
+
+    this.tfsTasksLoading = false;
+    this.tfsAuthOk = result.ok;
+    this.tfsAuthUser = result.authUser || this.tfsAuthUser;
+    this.tfsError = result.ok ? '' : result.error;
+    this.tfsTasksError = result.ok ? '' : result.error;
+    this.tfsProjectTasks.set(projectKey, result.tasks || []);
+    this.sendConversationSessions();
+    if (result.ok) {
+      await this.ensureTfsConversationActive(!!options.openFirstTask);
+    }
+  }
+
   private activateConversation(conversation: StoredConversationSession) {
     this.activeConversationId = conversation.id;
     this.activeEngine = this.engineStore.getOrCreate(conversation.id, conversation.messages, conversation.agentRuntime);
@@ -1253,9 +1784,7 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
     }
     this.changeController.restoreState(changeState || null);
     this.chatHistory.splice(0, this.chatHistory.length, ...conversation.messages);
-    const artifactEvents = conversation.source.type === 'jira'
-      ? filterJiraContextStatusArtifacts(conversation.artifactEvents, conversation.source.issueKey)
-      : conversation.artifactEvents;
+    const artifactEvents = filterTaskContextStatusArtifacts(conversation);
     this.chatArtifacts = Array.isArray(artifactEvents)
       ? artifactEvents.map((artifact) => clonePersistedArtifact(artifact))
       : [];
@@ -1419,6 +1948,58 @@ export class AiChatViewProvider implements vscode.WebviewViewProvider {
     this.scheduleArtifactPersist();
   }
 
+  private recordUserMessageTelemetry(): void {
+    try {
+      this.metricsService.enqueue(buildUserMessageTelemetryEvent(this.buildTelemetryConversationContext()));
+    } catch {
+      // Telemetry must not affect chat submission.
+    }
+  }
+
+  private recordMessageTelemetry(message: ExtensionToWebviewMessage): void {
+    try {
+      const events = buildExtensionMessageTelemetryEvents(
+        this.buildTelemetryConversationContext(),
+        message,
+        this.resolveTelemetryRunId(message),
+      );
+      if (events.length > 0) {
+        this.metricsService.enqueueMany(events);
+      }
+    } catch {
+      // Telemetry must not affect UI updates.
+    }
+  }
+
+  private recordChatRunTelemetry(signal: ChatRunTelemetrySignal): void {
+    try {
+      const events = buildChatRunTelemetryEvents(this.buildTelemetryConversationContext(), signal);
+      if (events.length > 0) {
+        this.metricsService.enqueueMany(events);
+      }
+    } catch {
+      // Telemetry must not affect agent execution.
+    }
+  }
+
+  private buildTelemetryConversationContext(): TelemetryConversationContext {
+    const active = this.conversationStore.getActiveConversation();
+    return {
+      conversationId: active.id,
+      source: active.source,
+      userApiKey: readConfig().apiKey || '',
+    };
+  }
+
+  private resolveTelemetryRunId(message: ExtensionToWebviewMessage): string {
+    const activeRunId = this.chatRunController.getActiveTraceRunId();
+    if (activeRunId) return activeRunId;
+    if (message.type === 'assistant' || message.type === 'checkpointUpdated') {
+      return this.chatRunController.getLatestTraceRunId() || '';
+    }
+    return '';
+  }
+
   private scheduleArtifactPersist(): void {
     if (this.artifactPersistTimer) return;
     this.artifactPersistTimer = setTimeout(() => {
@@ -1520,6 +2101,20 @@ function normalizeJiraKey(value: unknown): string {
   return String(value || '').trim().toUpperCase();
 }
 
+function normalizeTfsProjectKey(value: unknown): string {
+  return String(value || '').trim();
+}
+
+function normalizeTfsProjectComparable(value: unknown): string {
+  return normalizeTfsProjectKey(value).toLowerCase();
+}
+
+function normalizeTfsWorkItemId(value: unknown): string {
+  const text = String(value || '').trim().replace(/^#/, '');
+  const parsed = Number(text);
+  return Number.isFinite(parsed) && parsed > 0 ? String(Math.floor(parsed)) : '';
+}
+
 function buildVirtualJiraConversationId(projectKey: string, issueKey: string): string {
   return `jira:${encodeURIComponent(normalizeJiraKey(projectKey))}:${encodeURIComponent(normalizeJiraKey(issueKey))}`;
 }
@@ -1533,10 +2128,43 @@ function parseVirtualJiraConversationId(value: string): { projectKey: string; is
   };
 }
 
+function buildVirtualTfsConversationId(projectKey: string, workItemId: string | number): string {
+  return `tfs:${encodeURIComponent(normalizeTfsProjectKey(projectKey))}:${encodeURIComponent(normalizeTfsWorkItemId(workItemId))}`;
+}
+
+function parseVirtualTfsConversationId(value: string): { projectKey: string; workItemId: string } | null {
+  const match = String(value || '').match(/^tfs:([^:]+):([^:]+)$/);
+  if (!match) return null;
+  return {
+    projectKey: normalizeTfsProjectKey(decodeURIComponent(match[1] || '')),
+    workItemId: normalizeTfsWorkItemId(decodeURIComponent(match[2] || '')),
+  };
+}
+
 function buildConversationPreview(messages: ChatMessage[]): string {
   const last = [...(Array.isArray(messages) ? messages : [])].reverse().find((message) => message.content.trim());
   if (!last) return 'История чата пока пуста.';
   return last.content.replace(/\s+/g, ' ').trim().slice(0, 120);
+}
+
+function filterGeneratedTaskContextChatMessages(conversation: StoredConversationSession): ChatMessage[] {
+  if (conversation.source.type === 'jira') {
+    return filterGeneratedJiraContextChatMessages(conversation.messages, conversation.source.issueKey);
+  }
+  if (conversation.source.type === 'tfs') {
+    return filterGeneratedTfsContextChatMessages(conversation.messages, conversation.source.workItemId);
+  }
+  return conversation.messages;
+}
+
+function filterTaskContextStatusArtifacts(conversation: StoredConversationSession): PersistedChatArtifact[] {
+  if (conversation.source.type === 'jira') {
+    return filterJiraContextStatusArtifacts(conversation.artifactEvents, conversation.source.issueKey);
+  }
+  if (conversation.source.type === 'tfs') {
+    return filterTfsContextStatusArtifacts(conversation.artifactEvents, conversation.source.workItemId);
+  }
+  return conversation.artifactEvents;
 }
 
 function isGeneratedJiraContextChatMessage(message: ChatMessage, issueKey: string): boolean {
@@ -1553,6 +2181,21 @@ function filterGeneratedJiraContextChatMessages(messages: ChatMessage[], issueKe
   );
 }
 
+function isGeneratedTfsContextChatMessage(message: ChatMessage, workItemId: string | number): boolean {
+  if (!message || message.role !== 'assistant') return false;
+  const key = normalizeTfsWorkItemId(workItemId);
+  if (!key) return false;
+  const content = String(message.content || '').trim();
+  return (content.startsWith(`Контекст TFS work item #${key}`) || content.startsWith(`Контекст TFS work item ${key}`))
+    && /Git-контекст по (?:#)?\d+:/i.test(content);
+}
+
+function filterGeneratedTfsContextChatMessages(messages: ChatMessage[], workItemId: string | number): ChatMessage[] {
+  return (Array.isArray(messages) ? messages : []).filter((message) =>
+    !isGeneratedTfsContextChatMessage(message, workItemId),
+  );
+}
+
 function isGeneratedJiraContextStatusArtifact(artifact: PersistedChatArtifact, issueKey: string): boolean {
   if (!artifact || artifact.kind !== 'statusMessage') return false;
   const key = normalizeJiraKey(issueKey);
@@ -1566,7 +2209,21 @@ function filterJiraContextStatusArtifacts(artifacts: PersistedChatArtifact[], is
   );
 }
 
+function isGeneratedTfsContextStatusArtifact(artifact: PersistedChatArtifact, workItemId: string | number): boolean {
+  if (!artifact || artifact.kind !== 'statusMessage') return false;
+  const key = normalizeTfsWorkItemId(workItemId);
+  const text = String(artifact.payload?.text || '').trim();
+  return !!key && text === `Обновляю контекст задачи #${key}...`;
+}
+
+function filterTfsContextStatusArtifacts(artifacts: PersistedChatArtifact[], workItemId: string | number): PersistedChatArtifact[] {
+  return (Array.isArray(artifacts) ? artifacts : []).filter((artifact) =>
+    !isGeneratedTfsContextStatusArtifact(artifact, workItemId),
+  );
+}
+
 type JiraConversationSource = Extract<ConversationSource, { type: 'jira' }>;
+type TfsConversationSource = Extract<ConversationSource, { type: 'tfs' }>;
 
 const JIRA_TASK_CONTEXT_TTL_MS = 2 * 60 * 1000;
 const JIRA_TASK_CONTEXT_FORCE_DEBOUNCE_MS = 15 * 1000;
@@ -1574,6 +2231,14 @@ const JIRA_TASK_CONTEXT_FORCE_DEBOUNCE_MS = 15 * 1000;
 interface JiraTaskContextSnapshot {
   source: JiraConversationSource;
   details: JiraTaskDetails | null;
+  detailError: string;
+  git: IssueGitContext;
+  updatedAt: number;
+}
+
+interface TfsTaskContextSnapshot {
+  source: TfsConversationSource;
+  details: TfsTaskDetails | null;
   detailError: string;
   git: IssueGitContext;
   updatedAt: number;
@@ -1623,6 +2288,36 @@ function buildJiraTaskExternalContext(context: JiraTaskContextSnapshot): string 
 }
 
 function buildFallbackJiraTaskContext(source: JiraConversationSource): JiraTaskContextSnapshot {
+  return {
+    source,
+    details: null,
+    detailError: '',
+    git: {
+      searchRoots: [],
+      repositories: [],
+      error: '',
+    },
+    updatedAt: Date.now(),
+  };
+}
+
+function buildTfsTaskExternalContext(context: TfsTaskContextSnapshot): string {
+  return [
+    'Текущий чат привязан к TFS work item. Этот блок является скрытым обновляемым контекстом, а не сообщением из истории чата.',
+    'Если пользователь говорит "эта задача", "текущая задача", "тикет" или "work item", речь о задаче ниже.',
+    'Важно: TFS work item описывает цель, но ответ по реализации должен опираться на текущую кодовую базу workspace.',
+    'Если пользователь просит изучить, спроектировать или реализовать текущую задачу, сначала проверь существующую реализацию через поиск/чтение файлов.',
+    'Для TFS-задач особенно проверяй существующие места по словам: TFS, tfsBaseUrl, tfs_get_task, tfs_search_tasks, ConversationSource, project tasks, task context.',
+    'В итоговом ответе не заявляй "отсутствует" или "нужно создать", если это не подтверждено прочитанными файлами текущего запуска; лучше называй конкретные файлы, которые уже есть и что в них надо менять.',
+    `Контекст обновлён: ${new Date(context.updatedAt).toISOString()}`,
+    '',
+    buildTfsInitialContextMessage(context.source, context.details, context.detailError, context.git),
+    '',
+    `Для свежих данных по этой задаче используй tfs_get_task с id="${context.source.workItemId}". Для задач текущего проекта используй tfs_search_tasks с project="${context.source.projectKey}".`,
+  ].filter(Boolean).join('\n');
+}
+
+function buildFallbackTfsTaskContext(source: TfsConversationSource): TfsTaskContextSnapshot {
   return {
     source,
     details: null,
@@ -1696,6 +2391,33 @@ function buildJiraContextViewSections(details: JiraTaskDetails | null): JiraTask
   return sections;
 }
 
+function buildTfsContextViewSections(details: TfsTaskDetails | null): TfsTaskContextViewState['sections'] {
+  if (!details) return [];
+  const sections: TfsTaskContextViewState['sections'] = [];
+  const addSection = (title: string, items: string[]): void => {
+    const visible = items.filter(Boolean);
+    if (!visible.length) return;
+    sections.push({ title, items: visible });
+  };
+
+  addSection('Связи', details.relations.map(formatTfsRelationViewLine));
+  addSection('История/комментарии', buildTfsHistoryPreviewItems(details));
+  addSection('Поля TFS', [
+    details.areaPath ? `Area: ${details.areaPath}` : '',
+    details.iterationPath ? `Iteration: ${details.iterationPath}` : '',
+    details.tags.length ? `Tags: ${details.tags.join(', ')}` : '',
+    details.valueArea ? `Value area: ${details.valueArea}` : '',
+    details.reason ? `Reason: ${details.reason}` : '',
+    details.changedBy ? `Changed by: ${details.changedBy}` : '',
+    details.stateChanged ? `State changed: ${details.stateChanged}` : '',
+    details.resolved ? `Resolved: ${details.resolved}${details.resolvedBy ? ` • ${details.resolvedBy}` : ''}` : '',
+    details.closed ? `Closed: ${details.closed}${details.closedBy ? ` • ${details.closedBy}` : ''}` : '',
+    ...details.customFields.map(formatTfsCustomFieldViewLine),
+  ]);
+  addSection('Предупреждения', details.warnings);
+  return sections;
+}
+
 function buildJiraCommentPreviewItems(details: JiraTaskDetails): string[] {
   if (!details.comments.length) {
     return details.commentsTotal ? [`Комментарии есть (${details.commentsTotal}), но их не удалось загрузить.`] : [];
@@ -1708,6 +2430,14 @@ function buildJiraCommentPreviewItems(details: JiraTaskDetails): string[] {
     items.unshift(`Загружено ${details.comments.length} из ${details.commentsTotal}`);
   }
   return items;
+}
+
+function buildTfsHistoryPreviewItems(details: TfsTaskDetails): string[] {
+  return details.history.slice(0, 20).map((item) => [
+    [`rev ${item.revision || '?'}`, item.author || 'n/a', item.date].filter(Boolean).join(' • '),
+    item.text ? limitText(item.text, 260) : '',
+    item.changedFields.length ? `Поля: ${item.changedFields.slice(0, 6).join(', ')}` : '',
+  ].filter(Boolean).join(': '));
 }
 
 function formatJiraLinkedIssueViewLine(issue: {
@@ -1737,12 +2467,30 @@ function formatJiraCustomFieldViewLine(field: { name: string; value: string }): 
   return `${name}: ${limitText(value, 180)}`;
 }
 
+function formatTfsRelationViewLine(relation: { label: string; type: string; targetId: number; url: string }): string {
+  return [
+    relation.label || relation.type || 'Связь',
+    relation.targetId ? `#${relation.targetId}` : '',
+    relation.url,
+  ].filter(Boolean).join(' • ');
+}
+
+function formatTfsCustomFieldViewLine(field: { name: string; value: string }): string {
+  const name = field.name || 'Поле TFS';
+  const value = String(field.value || '').trim();
+  return value ? `${name}: ${limitText(value, 180)}` : '';
+}
+
 function isNoisyJiraViewField(name: string, value: string): boolean {
   const text = `${name}\n${value}`;
   return /com\.atlassian\.jira\.plugin\.devstatus|SummaryBean@|SummaryItemBean@|OverallBean@|\{summaryBean=/i.test(text);
 }
 
 function formatJiraTaskContextError(error: any): string {
+  return error?.message || error?.cause?.message || String(error || 'Не удалось сформировать контекст задачи.');
+}
+
+function formatTaskContextError(error: any): string {
   return error?.message || error?.cause?.message || String(error || 'Не удалось сформировать контекст задачи.');
 }
 
@@ -1787,6 +2535,44 @@ function buildJiraInitialContextMessage(
   return lines.filter((line, index, all) => line || all[index - 1] !== '').join('\n').trim();
 }
 
+function buildTfsInitialContextMessage(
+  source: TfsConversationSource,
+  details: TfsTaskDetails | null,
+  detailError: string,
+  git: IssueGitContext,
+): string {
+  const tags = details?.tags?.length ? details.tags.join(', ') : '';
+  const lines = [
+    `Контекст TFS work item #${source.workItemId}`,
+    '',
+    `Проект: ${source.projectKey}${source.projectName ? ` • ${source.projectName}` : ''}`,
+    `Задача: #${source.workItemId} • ${source.workItemTitle}`,
+    source.workItemStatus ? `Статус: ${source.workItemStatus}` : '',
+    (details?.type || source.workItemType) ? `Тип: ${details?.type || source.workItemType}` : '',
+    details?.priority ? `Приоритет: ${details.priority}` : '',
+    details?.severity ? `Severity: ${details.severity}` : '',
+    details?.assignedTo ? `Исполнитель: ${details.assignedTo}` : '',
+    details?.createdBy ? `Автор: ${details.createdBy}` : '',
+    details?.created ? `Создана: ${details.created}` : '',
+    details?.updated ? `Обновлена: ${details.updated}` : '',
+    details?.areaPath ? `Area: ${details.areaPath}` : '',
+    details?.iterationPath ? `Iteration: ${details.iterationPath}` : '',
+    tags ? `Tags: ${tags}` : '',
+    source.workItemUrl ? `URL: ${source.workItemUrl}` : '',
+    detailError ? `Детали TFS не удалось обновить: ${detailError}` : '',
+    '',
+    'Описание:',
+    source.workItemDescription || 'Описание в TFS не заполнено.',
+    '',
+    buildTfsTaskDetailsExtraContext(details),
+    '',
+    buildIssueGitContextText(buildTfsGitSearchKey(source), git),
+    '',
+    `Дальше считаем этот чат рабочим контекстом TFS work item #${source.workItemId}.`,
+  ];
+  return lines.filter((line, index, all) => line || all[index - 1] !== '').join('\n').trim();
+}
+
 function buildJiraTaskDetailsExtraContext(details: JiraTaskDetails | null): string {
   if (!details) return '';
   const blocks = [
@@ -1797,6 +2583,51 @@ function buildJiraTaskDetailsExtraContext(details: JiraTaskDetails | null): stri
     details.warnings.length ? ['Предупреждения Jira:', ...details.warnings.map((warning) => `- ${warning}`)].join('\n') : '',
   ].filter(Boolean);
   return blocks.join('\n\n');
+}
+
+function buildTfsTaskDetailsExtraContext(details: TfsTaskDetails | null): string {
+  if (!details) return '';
+  const blocks = [
+    buildTfsRelationsContext(details),
+    buildTfsHistoryContext(details),
+    buildTfsCustomFieldsContext(details),
+    details.warnings.length ? ['Предупреждения TFS:', ...details.warnings.map((warning) => `- ${warning}`)].join('\n') : '',
+  ].filter(Boolean);
+  return blocks.join('\n\n');
+}
+
+function buildTfsRelationsContext(details: TfsTaskDetails): string {
+  if (!details.relations.length) return '';
+  const lines = ['Связи TFS:'];
+  for (const relation of details.relations) {
+    lines.push(`- ${formatTfsRelationViewLine(relation)}`);
+  }
+  return lines.join('\n');
+}
+
+function buildTfsHistoryContext(details: TfsTaskDetails): string {
+  if (!details.history.length) return '';
+  const lines = [`История/комментарии TFS (${details.history.length}):`];
+  for (const item of details.history.slice(0, 80)) {
+    const header = `- rev ${item.revision || '?'} • ${item.author || 'n/a'} • ${item.date || 'без даты'}`;
+    const body = item.text ? indentText(limitText(item.text, 3_000), '  ') : '';
+    const fields = item.changedFields.length ? `  Поля: ${item.changedFields.join(', ')}` : '';
+    lines.push([header, body, fields].filter(Boolean).join('\n'));
+  }
+  return lines.join('\n');
+}
+
+function buildTfsCustomFieldsContext(details: TfsTaskDetails): string {
+  const lines = ['Дополнительные поля TFS:'];
+  if (details.areaPath) lines.push(`- Area: ${details.areaPath}`);
+  if (details.iterationPath) lines.push(`- Iteration: ${details.iterationPath}`);
+  if (details.valueArea) lines.push(`- Value area: ${details.valueArea}`);
+  if (details.reason) lines.push(`- Reason: ${details.reason}`);
+  if (details.tags.length) lines.push(`- Tags: ${details.tags.join(', ')}`);
+  for (const field of details.customFields) {
+    lines.push(`- ${field.name} (${field.id}): ${limitText(field.value, 2_000)}`);
+  }
+  return lines.length > 1 ? lines.join('\n') : '';
 }
 
 function buildJiraLinkedIssuesContext(details: JiraTaskDetails): string {
@@ -2152,6 +2983,16 @@ function buildSwitchCommand(branch: GitBranchRef): string {
   return branch.type === 'remote'
     ? `git switch --track ${branch.name}`
     : `git switch ${branch.name}`;
+}
+
+function buildTfsGitSearchKey(source: TfsConversationSource): string {
+  const id = normalizeTfsWorkItemId(source.workItemId);
+  return id ? `#${id}` : 'tfs-work-item';
+}
+
+function buildTfsBranchNameKey(source: TfsConversationSource): string {
+  const id = normalizeTfsWorkItemId(source.workItemId);
+  return id ? `tfs-${id}` : 'tfs-work-item';
 }
 
 function buildIssueBranchName(issueKey: string): string {

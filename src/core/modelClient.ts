@@ -94,6 +94,7 @@ function getCachedDispatcher(): unknown | undefined {
 
 const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
 const MAX_RETRY_DELAY_MS = 30_000;
+const RETRY_UNTIL_SUCCESS_DELAY_MS = 3_000;
 export const USER_ABORT_MESSAGE = 'Задача остановлена пользователем.';
 
 export interface RetryNotice {
@@ -312,8 +313,9 @@ function isTimeoutError(err: any, signal?: AbortSignal): boolean {
   return err?.name === 'AbortError' || err?.name === 'TimeoutError';
 }
 
-function retryDelay(attempt: number, status?: number): number {
+function retryDelay(attempt: number, status?: number, retryUntilSuccess?: boolean): number {
   if (status === 429) return Math.min(5_000 * Math.pow(2, attempt - 1), MAX_RETRY_DELAY_MS);
+  if (retryUntilSuccess) return RETRY_UNTIL_SUCCESS_DELAY_MS;
   return Math.min(1_500 * Math.pow(2, attempt - 1), MAX_RETRY_DELAY_MS);
 }
 
@@ -361,7 +363,7 @@ async function withRetry<T>(
       const retryable = timeout || isTransientError(error) || (status !== undefined && RETRYABLE_STATUS.has(status));
       if (!retryable || (!retryUntilSuccess && attempt >= maxAttempts)) break;
 
-      const delayMs = retryDelay(attempt, status);
+      const delayMs = retryDelay(attempt, status, retryUntilSuccess);
       onRetry?.({
         attempt,
         maxAttempts: retryUntilSuccess ? undefined : maxAttempts,

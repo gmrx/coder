@@ -1,5 +1,6 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
+import { readConfig } from '../../core/api';
 import type {
   McpHttpServerConfig,
   McpOAuthConfig,
@@ -8,8 +9,6 @@ import type {
   McpServerRegistry,
   McpStdioServerConfig,
 } from './types';
-
-const DEFAULT_CONFIG_CANDIDATES = ['.mcp.json', '.cursor/mcp.json'];
 
 function hasText(value: unknown): boolean {
   return value !== undefined && value !== null && String(value).trim() !== '';
@@ -121,7 +120,7 @@ function normalizeServerConfig(
   options: {
     workspacePath: string;
     sourceLabel: string;
-    sourceKind: 'workspace-file' | 'settings';
+    sourceKind: 'settings';
   },
 ): { config?: McpResolvedServerConfig; error?: string } {
   if (!rawConfig || typeof rawConfig !== 'object' || Array.isArray(rawConfig)) {
@@ -218,52 +217,6 @@ function normalizeServerConfig(
   };
 }
 
-async function readJsonFile(filePath: string): Promise<unknown> {
-  const bytes = await vscode.workspace.fs.readFile(vscode.Uri.file(filePath));
-  return JSON.parse(Buffer.from(bytes).toString('utf8'));
-}
-
-async function loadWorkspaceFileServers(
-  workspacePath: string,
-  filePath: string,
-  registry: McpServerRegistry,
-): Promise<void> {
-  try {
-    const raw = await readJsonFile(filePath);
-    const value = raw as { mcpServers?: Record<string, unknown> };
-    if (!value || typeof value !== 'object' || Array.isArray(value)) {
-      registry.errors.push(`Файл ${path.basename(filePath)} должен содержать JSON-объект.`);
-      return;
-    }
-    const rawServers = value.mcpServers;
-    if (!rawServers || typeof rawServers !== 'object' || Array.isArray(rawServers)) {
-      registry.errors.push(`Файл ${path.basename(filePath)} должен содержать объект "mcpServers".`);
-      return;
-    }
-
-    registry.sources.push(path.relative(workspacePath, filePath) || path.basename(filePath));
-    for (const [serverName, rawConfig] of Object.entries(rawServers)) {
-      const normalized = normalizeServerConfig(serverName, rawConfig, {
-        workspacePath,
-        sourceLabel: path.relative(workspacePath, filePath) || path.basename(filePath),
-        sourceKind: 'workspace-file',
-      });
-      if (normalized.error) {
-        registry.errors.push(normalized.error);
-        continue;
-      }
-      if (normalized.config) {
-        registry.servers[serverName] = normalized.config;
-      }
-    }
-  } catch (error: any) {
-    if (error && typeof error === 'object' && 'code' in error && error.code === 'FileNotFound') {
-      return;
-    }
-    registry.errors.push(`Не удалось прочитать ${path.basename(filePath)}: ${error?.message || error}`);
-  }
-}
-
 export async function loadMcpServerRegistry(): Promise<McpServerRegistry> {
   const registry: McpServerRegistry = {
     servers: {},
@@ -272,17 +225,8 @@ export async function loadMcpServerRegistry(): Promise<McpServerRegistry> {
   };
 
   const workspacePath = getMcpWorkspacePath();
-  const configuration = vscode.workspace.getConfiguration('aiAssistant');
-  const customConfigPath = String(configuration.get<string>('mcpConfigPath') || '').trim();
-  const candidatePaths = customConfigPath
-    ? [normalizeConfigPath(workspacePath, customConfigPath)]
-    : DEFAULT_CONFIG_CANDIDATES.map((relativePath) => path.resolve(workspacePath, relativePath));
-
-  for (const candidate of [...new Set(candidatePaths)]) {
-    await loadWorkspaceFileServers(workspacePath, candidate, registry);
-  }
-
-  const rawSettingsServers = configuration.get<Record<string, unknown>>('mcpServers') || {};
+  const config = readConfig();
+  const rawSettingsServers = config.mcpServers || {};
   if (rawSettingsServers && typeof rawSettingsServers === 'object' && !Array.isArray(rawSettingsServers)) {
     const entries = Object.entries(rawSettingsServers);
     if (entries.length > 0) {
@@ -312,7 +256,7 @@ export function buildMcpServerRegistryFromMap(
   options?: {
     workspacePath?: string;
     sourceLabel?: string;
-    sourceKind?: 'workspace-file' | 'settings';
+    sourceKind?: 'settings';
   },
 ): McpServerRegistry {
   const workspacePath = options?.workspacePath || getMcpWorkspacePath();
@@ -351,7 +295,7 @@ export function buildMcpServerRegistryFromMap(
 
 export function buildMcpConfigHelpText(): string {
   return (
-    'Настрой MCP через .mcp.json в корне workspace, .cursor/mcp.json или settings aiAssistant.mcpServers. ' +
+    'Настрой MCP через settings aiAssistant.mcpServers в настройках расширения. ' +
     'Сейчас поддерживаются stdio и http-конфиги; для http можно дополнительно указать oauth.'
   );
 }

@@ -17,7 +17,9 @@ export interface ConversationStateMessage {
   sessionId: string;
   title: string;
   source: ConversationSource;
+  taskContext?: TaskContextViewState | null;
   jiraContext?: JiraTaskContextViewState | null;
+  tfsContext?: TfsTaskContextViewState | null;
   replace?: boolean;
   messages: Array<Pick<ChatMessage, 'role' | 'content'>>;
   suggestions: FollowupSuggestion[];
@@ -36,7 +38,8 @@ export interface ConversationStateMessage {
   pendingChangeIds?: string[];
 }
 
-export interface JiraTaskContextViewState {
+export interface TaskContextViewState {
+  system: 'jira' | 'tfs';
   issueKey: string;
   title: string;
   project: string;
@@ -50,6 +53,16 @@ export interface JiraTaskContextViewState {
   sections: JiraTaskContextSectionView[];
   repositoriesChecked: number;
   commits: JiraTaskCommitView[];
+}
+
+export interface JiraTaskContextViewState extends TaskContextViewState {
+  system: 'jira';
+}
+
+export interface TfsTaskContextViewState extends TaskContextViewState {
+  system: 'tfs';
+  workItemId: string;
+  workItemType: string;
 }
 
 export interface JiraTaskContextSectionView {
@@ -73,8 +86,9 @@ export interface ConversationSessionsMessage {
   type: 'conversationSessions';
   activeId: string;
   sessions: ConversationSummaryDto[];
-  mode: 'free' | 'jira';
+  mode: 'free' | 'jira' | 'tfs';
   jira: JiraConversationScopeState;
+  tfs: TfsConversationScopeState;
 }
 
 export interface JiraConversationScopeState {
@@ -93,4 +107,24 @@ export interface JiraConversationProjectOption {
   key: string;
   name: string;
   url: string;
+}
+
+export interface TfsConversationScopeState {
+  selectedProjectKey: string;
+  selectedProjectName: string;
+  authOk: boolean;
+  authUser: string;
+  error: string;
+  projectsLoading: boolean;
+  tasksLoading: boolean;
+  tasksError: string;
+  projects: TfsConversationProjectOption[];
+}
+
+export interface TfsConversationProjectOption {
+  key: string;
+  name: string;
+  url: string;
+  description?: string;
+  state?: string;
 }

@@ -437,6 +437,24 @@ const TOOL_PRESENTATION_CONTRACTS: Partial<Record<string, ToolPresentationContra
       return execution.status === 'error' ? 'Не удалось прочитать задачу Jira' : 'Получил задачу Jira';
     },
   },
+  tfs_list_projects: {
+    startSummary: 'Читаю проекты TFS',
+    buildResultSummary(execution) {
+      return execution.status === 'error' ? 'Не удалось прочитать проекты TFS' : 'Получил проекты TFS';
+    },
+  },
+  tfs_search_tasks: {
+    startSummary: 'Ищу задачи TFS',
+    buildResultSummary(execution) {
+      return execution.status === 'error' ? 'Не удалось прочитать задачи TFS' : 'Получил задачи TFS';
+    },
+  },
+  tfs_get_task: {
+    startSummary: 'Читаю задачу TFS',
+    buildResultSummary(execution) {
+      return execution.status === 'error' ? 'Не удалось прочитать задачу TFS' : 'Получил задачу TFS';
+    },
+  },
 };
 
 export function getToolStartSummary(toolName: string): string {

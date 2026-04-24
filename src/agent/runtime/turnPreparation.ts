@@ -128,19 +128,19 @@ function buildInitialMessages(
 }
 
 function buildAutoRetrievalQuery(question: string, externalContext: string): string {
-  const taskHints = extractJiraTaskRetrievalHints(externalContext);
+  const taskHints = extractTaskRetrievalHints(externalContext);
   if (!taskHints) return question;
   return [
     question,
     '',
-    'Контекст Jira-задачи для поиска по текущей кодовой базе:',
+    'Контекст задачи из Jira/TFS для поиска по текущей кодовой базе:',
     taskHints,
   ].join('\n').trim();
 }
 
-function extractJiraTaskRetrievalHints(externalContext: string): string {
+function extractTaskRetrievalHints(externalContext: string): string {
   const context = String(externalContext || '');
-  if (!/Контекст Jira-задачи/i.test(context)) return '';
+  if (!/Контекст (?:Jira-задачи|TFS work item)/i.test(context)) return '';
   const lines = context.split(/\r?\n/);
   const selected: string[] = [];
   let includeDescription = false;
@@ -151,7 +151,7 @@ function extractJiraTaskRetrievalHints(externalContext: string): string {
       includeDescription = false;
       continue;
     }
-    if (/^(Контекст Jira-задачи|Проект:|Задача:|Статус:|Тип:|Приоритет:|Labels:|Components:|Fix versions:)/i.test(trimmed)) {
+    if (/^(Контекст Jira-задачи|Контекст TFS work item|Проект:|Задача:|Статус:|Тип:|Приоритет:|Severity:|Area:|Iteration:|Tags:|Labels:|Components:|Fix versions:)/i.test(trimmed)) {
       selected.push(trimmed);
       continue;
     }
@@ -167,14 +167,14 @@ function extractJiraTaskRetrievalHints(externalContext: string): string {
       continue;
     }
     if (
-      /^Комментарии Jira/i.test(trimmed) ||
-      (/^- .{0,160}$/i.test(trimmed) && /jira|авторизац|интеграц|api|проект|задач|чат/i.test(trimmed))
+      /^(Комментарии Jira|История\/комментарии TFS)/i.test(trimmed) ||
+      (/^- .{0,160}$/i.test(trimmed) && /jira|tfs|wiql|work item|авторизац|интеграц|api|проект|задач|чат/i.test(trimmed))
     ) {
       selected.push(trimmed);
     }
     if (selected.join('\n').length >= 1_400) break;
   }
-  return compactTextWithBoundary(selected.join('\n'), 1_500, 'Jira-подсказки для поиска по коду');
+  return compactTextWithBoundary(selected.join('\n'), 1_500, 'подсказки задачи для поиска по коду');
 }
 
 function buildSessionMemoryMessage(

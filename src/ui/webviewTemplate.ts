@@ -74,9 +74,13 @@ function getSettingsMarkup(cancelLabel: string): string {
             <span class="settings-nav-label">Jira</span>
             <span class="settings-nav-desc">Хост, логин и пароль</span>
           </button>
+          <button class="settings-nav-item" type="button" data-settings-nav="tfs">
+            <span class="settings-nav-label">TFS</span>
+            <span class="settings-nav-desc">Team Foundation Server</span>
+          </button>
           <button class="settings-nav-item" type="button" data-settings-nav="mcp">
             <span class="settings-nav-label">MCP</span>
-            <span class="settings-nav-desc">Серверы, auth и config</span>
+            <span class="settings-nav-desc">Серверы и auth</span>
           </button>
           <button class="settings-nav-item" type="button" data-settings-nav="web">
             <span class="settings-nav-label">Интернет</span>
@@ -95,7 +99,7 @@ function getSettingsMarkup(cancelLabel: string): string {
                   <span class="conn-dot err"></span>
                   <span id="modelIssueText">Текущая chat-модель недоступна.</span>
                 </div>
-                <div id="modelIssueMeta" class="settings-status-meta">Выберите модель из списка и сохраните настройки.</div>
+                <div id="modelIssueMeta" class="settings-status-meta">Выберите модель из списка, она сохранится автоматически.</div>
               </div>
               <div class="settings-section">
                 <div class="settings-section-header"><span>Подключение API</span><button class="btn btn-secondary btn-xs" id="testConnBtn">Проверить подключение</button></div>
@@ -173,6 +177,49 @@ function getSettingsMarkup(cancelLabel: string): string {
               </div>
             </div>
 
+            <div class="settings-pane" data-settings-pane="tfs">
+              <div class="settings-pane-header">
+                <div class="settings-pane-title">TFS</div>
+                <div class="settings-pane-desc">Настрой доступ к Visual Studio Team Foundation Server для чтения проектов и work items агентом.</div>
+              </div>
+              <div class="settings-section">
+                <div class="settings-section-header"><span>Подключение TFS</span><button class="btn btn-secondary btn-xs" id="tfsCheckBtn" type="button">Проверить TFS</button></div>
+                <div class="settings-section-body">
+                  <div class="field">
+                    <div class="field-label">Хост TFS <span class="badge badge-required">обязательно</span></div>
+                    <div class="field-desc">Базовый адрес TFS-сервера. Коллекцию можно указать отдельно ниже.</div>
+                    <input id="s_tfsBaseUrl" class="field-input" spellcheck="false" placeholder="http://tfs.example.local:8080/tfs" />
+                  </div>
+                  <div class="field">
+                    <div class="field-label">Коллекция <span class="badge badge-required">обязательно</span></div>
+                    <div class="field-desc">Обычно DefaultCollection. Если хост уже содержит коллекцию, она подставится автоматически.</div>
+                    <input id="s_tfsCollection" class="field-input" spellcheck="false" placeholder="DefaultCollection" />
+                  </div>
+                  <div class="field">
+                    <div class="field-label">Логин <span class="badge badge-required">обязательно</span></div>
+                    <div class="field-desc">Можно указать короткий логин; при 401 расширение попробует DOMAIN\\login из NTLM challenge.</div>
+                    <input id="s_tfsUsername" class="field-input" spellcheck="false" autocomplete="username" placeholder="username или DOMAIN\\username" />
+                  </div>
+                  <div class="field">
+                    <div class="field-label">Пароль <span class="badge badge-required">обязательно</span></div>
+                    <div class="field-desc">Пароль доменной учётной записи TFS.</div>
+                    <div class="field-input-wrap">
+                      <input id="s_tfsPassword" class="field-input has-btn" type="password" spellcheck="false" autocomplete="current-password" placeholder="пароль" />
+                      <button class="field-input-btn" id="toggleTfsPasswordBtn" type="button" title="Показать / скрыть">&#128065;</button>
+                    </div>
+                  </div>
+                  <div id="tfsStatusCard" class="settings-status-card is-compact">
+                    <div class="settings-status-row">
+                      <span id="tfsStatusDot" class="conn-dot idle"></span>
+                      <span id="tfsStatusText">TFS ещё не проверялся.</span>
+                    </div>
+                    <div id="tfsStatusMeta" class="settings-status-meta">Проверка покажет пользователя, коллекцию, количество проектов и work items пользователя.</div>
+                  </div>
+                  <div id="tfsProjectList" class="jira-project-list"></div>
+                </div>
+              </div>
+            </div>
+
             <div class="settings-pane" data-settings-pane="mcp">
               <div class="settings-pane-header">
                 <div class="settings-pane-title">MCP</div>
@@ -189,10 +236,6 @@ function getSettingsMarkup(cancelLabel: string): string {
                   <details class="settings-inline-details">
                     <summary>Дополнительно</summary>
                     <div class="settings-inline-details-body">
-                      <div class="field">
-                        <div class="field-label" title="Если оставить пустым, при первом сохранении с серверами будет создан .mcp.json в корне workspace.">Путь к MCP config <span class="badge badge-optional">необязательно</span></div>
-                        <input id="s_mcpConfigPath" class="field-input" spellcheck="false" placeholder=".mcp.json или .cursor/mcp.json" />
-                      </div>
                       <div class="settings-actions settings-actions-secondary">
                         <button class="btn btn-secondary btn-xs" id="mcpClearBtn" type="button" title="Удалить все серверы из текущего черновика">Очистить всё</button>
                       </div>
@@ -202,7 +245,7 @@ function getSettingsMarkup(cancelLabel: string): string {
                   <div id="mcpStatusCard" class="settings-status-card is-compact">
                     <div class="settings-status-row">
                       <span id="mcpStatusDot" class="conn-dot idle"></span>
-                      <span id="mcpStatusText">Можно оставить пустым, если MCP настраивается через файл.</span>
+                      <span id="mcpStatusText">Можно оставить пустым, если MCP не используется.</span>
                     </div>
                   </div>
                   <div class="mcp-inspector">
@@ -270,7 +313,7 @@ function getSettingsMarkup(cancelLabel: string): string {
               </div>
             </div>
           </div>
-          <div class="save-bar"><div id="saveStatus" class="save-status"></div><div class="spacer"></div><button class="btn btn-secondary" id="cancelBtn">${cancelLabel}</button><button class="btn btn-primary" id="saveBtn">Сохранить</button></div>
+          <div class="save-bar"><div id="saveStatus" class="save-status"></div><div class="spacer"></div><button class="btn btn-secondary" id="cancelBtn">${cancelLabel}</button><button class="btn btn-primary" id="saveBtn">Сохранить сейчас</button></div>
         </div>
       </div>
     </div>`;
@@ -334,7 +377,7 @@ export function getChatViewHtml(webview: vscode.Webview, extensionUri: vscode.Ur
             <div id="jiraContextTitle" class="jira-context-title"></div>
             <div id="jiraContextMeta" class="jira-context-meta"></div>
           </div>
-          <a id="jiraContextLink" class="jira-context-link hidden" href="#" title="Открыть задачу Jira">Открыть</a>
+          <a id="jiraContextLink" class="jira-context-link hidden" href="#" title="Открыть задачу">Открыть</a>
         </div>
         <div id="jiraContextDescription" class="jira-context-description"></div>
         <div id="jiraContextCommits" class="jira-context-commits"></div>
@@ -352,12 +395,12 @@ export function getChatViewHtml(webview: vscode.Webview, extensionUri: vscode.Ur
         </div>
         <div class="jira-chat-scope">
           <div class="jira-chat-scope-row">
-            <select id="jiraProjectSelect" class="jira-chat-project-select" title="Выбрать проект Jira или обычный чат">
+            <select id="jiraProjectSelect" class="jira-chat-project-select" title="Выбрать обычный чат, проект Jira или проект TFS">
               <option value="">Обычный чат</option>
             </select>
-            <button class="btn btn-secondary btn-xs jira-chat-refresh" id="refreshJiraProjectsBtn" type="button" title="Обновить проекты и задачи Jira">↻</button>
+            <button class="btn btn-secondary btn-xs jira-chat-refresh" id="refreshJiraProjectsBtn" type="button" title="Обновить проекты и задачи Jira/TFS">↻</button>
           </div>
-          <div id="jiraChatScopeStatus" class="jira-chat-scope-status">Обычный режим: чаты не связаны с Jira.</div>
+          <div id="jiraChatScopeStatus" class="jira-chat-scope-status">Обычный режим: чаты не связаны с задачами.</div>
         </div>
         <div id="chatSessionsList" class="chat-session-list"></div>
         <div class="chat-sidebar-footer">

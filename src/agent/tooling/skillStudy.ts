@@ -130,7 +130,7 @@ export function formatSkillNotFoundResult(rawName: string, suggestions: Discover
       lines.push(`   Шаблон вызова: ${buildSkillInvokeTemplate(skill.name)}`);
     });
   } else {
-    lines.push('', 'Проверь имя навыка или создай новый SKILL.md в .codex/skills, .cursor/skills, .cursorcoder/skills или .claude/skills.');
+    lines.push('', 'Проверь имя навыка или добавь пользовательский SKILL.md в глобальный каталог навыков, вне workspace проекта.');
   }
 
   return lines.join('\n');

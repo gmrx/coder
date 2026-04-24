@@ -203,6 +203,26 @@ export const TOOL_INPUT_VALIDATORS: Partial<Record<string, ToolInputValidator>> 
     }
     return null;
   },
+  tfs_list_projects(args) {
+    return validateLimitOffset('tfs_list_projects', args);
+  },
+  tfs_search_tasks(args) {
+    const paginationError = validateLimitOffset('tfs_search_tasks', {
+      limit: args?.limit ?? args?.maxResults ?? args?.max_results,
+      offset: args?.offset ?? args?.startAt ?? args?.start_at,
+    });
+    if (paginationError) return paginationError;
+    if (args?.wiql !== undefined && !hasText(args.wiql)) {
+      return 'Для "tfs_search_tasks" args.wiql должен быть непустой строкой';
+    }
+    return null;
+  },
+  tfs_get_task(args) {
+    if (!hasAny(args, ['id', 'workItemId', 'work_item_id', 'key'])) {
+      return 'Для "tfs_get_task" обязателен args.id';
+    }
+    return null;
+  },
   list_mcp_resources(args) {
     return args?.server === undefined || hasText(args?.server)
       ? null

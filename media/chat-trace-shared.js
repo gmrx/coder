@@ -121,6 +121,9 @@
       jira_list_projects: 'проекты Jira',
       jira_search_tasks: 'задачи Jira',
       jira_get_task: 'задача Jira',
+      tfs_list_projects: 'проекты TFS',
+      tfs_search_tasks: 'задачи TFS',
+      tfs_get_task: 'задача TFS',
       list_mcp_resources: 'ресурсы MCP',
       read_mcp_resource: 'чтение MCP ресурса'
     };

@@ -35,6 +35,17 @@ export type ConversationSource =
     issueUrl: string;
     issueStatus: string;
     issueDescription: string;
+  }
+  | {
+    type: 'tfs';
+    projectKey: string;
+    projectName: string;
+    workItemId: string;
+    workItemTitle: string;
+    workItemUrl: string;
+    workItemStatus: string;
+    workItemDescription: string;
+    workItemType: string;
   };
 
 export interface ConversationSummaryDto {
@@ -135,6 +146,15 @@ export class ConversationStore {
     return found ? cloneConversation(found) : null;
   }
 
+  findTfsConversation(workItemId: string | number): StoredConversationSession | null {
+    const normalizedWorkItemId = normalizeTfsWorkItemId(workItemId);
+    if (!normalizedWorkItemId) return null;
+    const found = this.state.conversations.find((conversation) =>
+      conversation.source.type === 'tfs' && normalizeTfsWorkItemId(conversation.source.workItemId) === normalizedWorkItemId,
+    );
+    return found ? cloneConversation(found) : null;
+  }
+
   async updateConversationSource(id: string, source: ConversationSource): Promise<StoredConversationSession | null> {
     const conversation = this.state.conversations.find((item) => item.id === id);
     if (!conversation) return null;
@@ -154,6 +174,33 @@ export class ConversationStore {
 
     const nextMessages = conversation.messages.filter((message) =>
       !isGeneratedJiraContextMessage(message, issueKey),
+    );
+    if (nextMessages.length === conversation.messages.length) {
+      return cloneConversation(conversation);
+    }
+
+    conversation.messages = nextMessages;
+    conversation.agentRuntime = null;
+    if (conversation.messages.length === 0) {
+      conversation.suggestions = [];
+      conversation.suggestionsState = 'starters';
+    }
+    conversation.suggestionsSummary = defaultSuggestionsSummary(conversation.messages.length > 0);
+    conversation.title = buildConversationTitle(conversation.source, conversation.messages);
+    conversation.updatedAt = Date.now();
+    this.trim();
+    await this.persist();
+    return cloneConversation(conversation);
+  }
+
+  async removeGeneratedTfsContextMessages(id: string): Promise<StoredConversationSession | null> {
+    const conversation = this.state.conversations.find((item) => item.id === id);
+    if (!conversation) return null;
+    if (conversation.source.type !== 'tfs') return cloneConversation(conversation);
+    const workItemId = conversation.source.workItemId;
+
+    const nextMessages = conversation.messages.filter((message) =>
+      !isGeneratedTfsContextMessage(message, workItemId),
     );
     if (nextMessages.length === conversation.messages.length) {
       return cloneConversation(conversation);
@@ -288,7 +335,8 @@ export class ConversationStore {
 
 export type ConversationListScope =
   | { type: 'free' }
-  | { type: 'jira'; projectKey: string };
+  | { type: 'jira'; projectKey: string }
+  | { type: 'tfs'; projectKey: string };
 
 function createEmptyConversation(source: ConversationSource = { type: 'free' }): StoredConversationSession {
   const now = Date.now();
@@ -352,6 +400,15 @@ function isGeneratedJiraContextMessage(message: ChatMessage, issueKey: string): 
   const key = normalizeKey(issueKey);
   return content.startsWith(`Контекст Jira-задачи ${key}`)
     && content.includes(`Git-контекст по ${key}:`);
+}
+
+function isGeneratedTfsContextMessage(message: ChatMessage, workItemId: string | number): boolean {
+  if (!message || message.role !== 'assistant') return false;
+  const content = String(message.content || '').trim();
+  const key = normalizeTfsWorkItemId(workItemId);
+  return !!key
+    && (content.startsWith(`Контекст TFS work item #${key}`) || content.startsWith(`Контекст TFS work item ${key}`))
+    && /Git-контекст по (?:#)?\d+:/i.test(content);
 }
 
 function normalizeSuggestions(suggestions: FollowupSuggestion[]): FollowupSuggestion[] {
@@ -442,6 +499,9 @@ function buildConversationTitle(source: ConversationSource, messages: ChatMessag
   if (source.type === 'jira') {
     return `${source.issueKey} • ${source.issueTitle || 'Задача Jira'}`.replace(/\s+/g, ' ').trim().slice(0, 120);
   }
+  if (source.type === 'tfs') {
+    return `#${source.workItemId} • ${source.workItemTitle || 'Work item TFS'}`.replace(/\s+/g, ' ').trim().slice(0, 120);
+  }
   return buildTitle(messages);
 }
 
@@ -490,6 +550,10 @@ function conversationMatchesScope(conversation: StoredConversationSession, scope
     return conversation.source.type === 'jira'
       && normalizeKey(conversation.source.projectKey) === normalizeKey(scope.projectKey);
   }
+  if (scope.type === 'tfs') {
+    return conversation.source.type === 'tfs'
+      && normalizeTfsProjectComparable(conversation.source.projectKey) === normalizeTfsProjectComparable(scope.projectKey);
+  }
   return conversation.source.type === 'free';
 }
 
@@ -510,17 +574,48 @@ export function normalizeConversationSource(value: any): ConversationSource {
       };
     }
   }
+  if (value && typeof value === 'object' && value.type === 'tfs') {
+    const workItemId = normalizeTfsWorkItemId(firstText(value.workItemId, value.id, value.key));
+    const projectKey = normalizeTfsProjectKey(firstText(value.projectKey, value.projectName, value.teamProject));
+    if (workItemId && projectKey) {
+      return {
+        type: 'tfs',
+        projectKey,
+        projectName: firstText(value.projectName, projectKey).slice(0, 160),
+        workItemId,
+        workItemTitle: firstText(value.workItemTitle, value.title, `#${workItemId}`).slice(0, 240),
+        workItemUrl: firstText(value.workItemUrl, value.url).slice(0, 500),
+        workItemStatus: firstText(value.workItemStatus, value.status, value.state).slice(0, 120),
+        workItemDescription: firstText(value.workItemDescription, value.description).slice(0, 4_000),
+        workItemType: firstText(value.workItemType, value.type).slice(0, 120),
+      };
+    }
+  }
   return { type: 'free' };
 }
 
 function cloneConversationSource(source: ConversationSource): ConversationSource {
-  return source.type === 'jira'
+  return source.type === 'jira' || source.type === 'tfs'
     ? { ...source }
     : { type: 'free' };
 }
 
 function normalizeKey(value: unknown): string {
   return String(value || '').trim().toUpperCase();
+}
+
+function normalizeTfsProjectKey(value: unknown): string {
+  return String(value || '').trim();
+}
+
+function normalizeTfsProjectComparable(value: unknown): string {
+  return normalizeTfsProjectKey(value).toLowerCase();
+}
+
+function normalizeTfsWorkItemId(value: unknown): string {
+  const text = String(value || '').trim().replace(/^#/, '');
+  const parsed = Number(text);
+  return Number.isFinite(parsed) && parsed > 0 ? String(Math.floor(parsed)) : '';
 }
 
 function firstText(...values: unknown[]): string {

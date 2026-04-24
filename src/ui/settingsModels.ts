@@ -98,6 +98,10 @@ export function normalizeSettingsPayload(data: SettingsPayload): AssistantConfig
     jiraBaseUrl: String(data.jiraBaseUrl || '').trim(),
     jiraUsername: String(data.jiraUsername || '').trim(),
     jiraPassword: String(data.jiraPassword || '').trim(),
+    tfsBaseUrl: String(data.tfsBaseUrl || '').trim(),
+    tfsCollection: String(data.tfsCollection || '').trim(),
+    tfsUsername: String(data.tfsUsername || '').trim(),
+    tfsPassword: String(data.tfsPassword || '').trim(),
     autoApproval: normalizeAutoApproval(data.autoApproval),
   };
 }

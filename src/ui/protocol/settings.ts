@@ -6,7 +6,7 @@ import type { ModelTestResult, SettingsPayload } from '../settingsModels';
 export interface SettingsDataPayload extends AssistantConfig {
   models: string[];
   mcpConfigExists: boolean;
-  mcpSource: 'workspace-file' | 'settings' | 'none';
+  mcpSource: 'settings' | 'none';
   mcpSourceLabel: string;
   mcpLoadError: string;
   settingsSection?: SettingsSectionId;
@@ -21,8 +21,9 @@ export interface SettingsDataMessage {
 
 export interface SettingsSavedMessage {
   type: 'settingsSaved';
-  mcpSavedPath?: string;
-  mcpCreatedFile?: boolean;
+  ok?: boolean;
+  error?: string;
+  silent?: boolean;
 }
 
 export interface ConnectionResultMessage {
@@ -70,6 +71,42 @@ export interface JiraCheckResultMessage {
   projectsCount: number;
   totalTasks: number;
   projects: JiraCheckProjectPayload[];
+  warning?: string;
+}
+
+export interface TfsCheckProjectPayload {
+  id: string;
+  key: string;
+  name: string;
+  description: string;
+  taskCount: number;
+  url: string;
+  tasks: TfsCheckTaskPayload[];
+}
+
+export interface TfsCheckTaskPayload {
+  id: number;
+  key: string;
+  title: string;
+  description: string;
+  url: string;
+  status: string;
+  type: string;
+  projectName: string;
+}
+
+export interface TfsCheckResultMessage {
+  type: 'tfsCheckResult';
+  ok: boolean;
+  error: string;
+  authUser: string;
+  authMode: 'anonymous' | 'basic';
+  baseUrl: string;
+  collection: string;
+  effectiveUsername: string;
+  projectsCount: number;
+  totalTasks: number;
+  projects: TfsCheckProjectPayload[];
   warning?: string;
 }
 

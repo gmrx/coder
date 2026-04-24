@@ -32,7 +32,7 @@ export interface McpResolvedServerConfigBase {
   type: McpTransportType;
   name: string;
   sourceLabel: string;
-  sourceKind: 'workspace-file' | 'settings';
+  sourceKind: 'settings';
 }
 
 export type McpResolvedStdioServerConfig = McpStdioServerConfig & McpResolvedServerConfigBase & {

@@ -6,7 +6,7 @@ type TextSection = {
 };
 
 const DEFAULT_KEY_LINE_RE =
-  /\b(jira|AILAB|AIPRJ|[A-Z][A-Z0-9]+-\d+|ошибк|error|warning|коммит|ветк|branch|репозитор|repo|статус|приоритет|исполнитель|автор|эпик|связ|описан|задач|проект|TODO|FIXME)\b/i;
+  /\b(jira|tfs|wiql|work item|AILAB|AIPRJ|[A-Z][A-Z0-9]+-\d+|#\d+|ошибк|error|warning|коммит|ветк|branch|репозитор|repo|статус|приоритет|исполнитель|автор|эпик|связ|описан|задач|проект|TODO|FIXME)\b/i;
 
 export function compactTextWithBoundary(
   text: string,
@@ -227,23 +227,23 @@ function packContextSection(section: TextSection, maxChars: number): string {
   const text = section.text.trim();
   if (!text || text.length <= maxChars) return text;
 
-  if (/^Комментарии Jira/i.test(section.title)) {
-    return packJiraCommentsSection(text, maxChars);
+  if (/^(Комментарии Jira|История\/комментарии TFS)/i.test(section.title)) {
+    return packJiraCommentsSection(text, maxChars, section.title);
   }
 
   return compactTextWithBoundary(text, maxChars, section.title);
 }
 
-function packJiraCommentsSection(text: string, maxChars: number): string {
+function packJiraCommentsSection(text: string, maxChars: number, label = 'Комментарии Jira'): string {
   const comments = parseJiraComments(text);
   if (comments.length === 0) {
-    return compactTextWithBoundary(text, maxChars, 'Комментарии Jira');
+    return compactTextWithBoundary(text, maxChars, label);
   }
 
   const header = [
-    comments[0]?.sectionTitle || 'Комментарии Jira:',
-    `[Сжато для контекстного окна: комментарии Jira]`,
-    `Всего комментариев в блоке: ${comments.length}. Сохранены все заголовки комментариев; длинные тела представлены ключевыми строками.`,
+    comments[0]?.sectionTitle || `${label}:`,
+    `[Сжато для контекстного окна: ${label}]`,
+    `Всего записей в блоке: ${comments.length}. Сохранены все заголовки; длинные тела представлены ключевыми строками.`,
   ];
   const bodyBudget = Math.max(400, maxChars - header.join('\n').length - 2);
   const perCommentBudget = Math.max(180, Math.floor(bodyBudget / Math.max(1, comments.length)));
@@ -260,7 +260,7 @@ function packJiraCommentsSection(text: string, maxChars: number): string {
 
   const packed = lines.join('\n');
   if (packed.length <= maxChars) return packed;
-  return compactTextWithBoundary(packed, maxChars, 'сжатый блок комментариев Jira');
+  return compactTextWithBoundary(packed, maxChars, `сжатый блок ${label}`);
 }
 
 function parseJiraComments(text: string): Array<{ sectionTitle: string; header: string; body: string }> {
@@ -317,16 +317,16 @@ function splitContextSections(text: string): TextSection[] {
 
 function isContextSectionHeader(line: string): boolean {
   if (!line) return false;
-  return /^(Контекст Jira-задачи\b|Описание:|Связи Jira:|Комментарии Jira(?:\b|\s*\()|Вложения Jira:|Дополнительные поля Jira:|Предупреждения Jira:|Git-контекст\b|Репозиторий:|Коммиты:|Репозитории с ошибками проверки:|Для свежих данных\b)/i.test(line);
+  return /^(Контекст Jira-задачи\b|Контекст TFS work item\b|Описание:|Связи Jira:|Связи TFS:|Комментарии Jira(?:\b|\s*\()|История\/комментарии TFS(?:\b|\s*\()|Вложения Jira:|Дополнительные поля Jira:|Дополнительные поля TFS:|Предупреждения Jira:|Предупреждения TFS:|Git-контекст\b|Репозиторий:|Коммиты:|Репозитории с ошибками проверки:|Для свежих данных\b)/i.test(line);
 }
 
 function sectionWeight(title: string): number {
   if (/Вводные инструкции/i.test(title)) return 0.8;
-  if (/Контекст Jira-задачи/i.test(title)) return 1.5;
+  if (/Контекст (?:Jira-задачи|TFS work item)/i.test(title)) return 1.5;
   if (/Описание/i.test(title)) return 2.0;
-  if (/Комментарии Jira/i.test(title)) return 2.2;
+  if (/Комментарии Jira|История\/комментарии TFS/i.test(title)) return 2.2;
   if (/Git-контекст|Репозиторий|Коммиты/i.test(title)) return 1.8;
-  if (/Связи Jira|Дополнительные поля|Вложения/i.test(title)) return 1.4;
+  if (/Связи Jira|Связи TFS|Дополнительные поля|Вложения/i.test(title)) return 1.4;
   return 1;
 }
 

@@ -36,7 +36,18 @@
     var jiraStatusMeta = $('#jiraStatusMeta');
     var jiraProjectList = $('#jiraProjectList');
 
-    var sMcpConfigPath = $('#s_mcpConfigPath');
+    var sTfsBaseUrl = $('#s_tfsBaseUrl');
+    var sTfsCollection = $('#s_tfsCollection');
+    var sTfsUsername = $('#s_tfsUsername');
+    var sTfsPassword = $('#s_tfsPassword');
+    var toggleTfsPasswordBtn = $('#toggleTfsPasswordBtn');
+    var tfsCheckBtn = $('#tfsCheckBtn');
+    var tfsStatusCard = $('#tfsStatusCard');
+    var tfsStatusDot = $('#tfsStatusDot');
+    var tfsStatusText = $('#tfsStatusText');
+    var tfsStatusMeta = $('#tfsStatusMeta');
+    var tfsProjectList = $('#tfsProjectList');
+
     var mcpServerList = $('#mcpServerList');
     var mcpStatusCard = $('#mcpStatusCard');
     var mcpStatusDot = $('#mcpStatusDot');
@@ -81,6 +92,14 @@
       trustedHosts: [],
       blockedHosts: []
     };
+    var AUTO_SAVE_DELAY_MS = 800;
+    var isApplyingSettingsData = false;
+    var autoSaveTimer = null;
+    var saveInFlight = false;
+    var saveQueued = false;
+    var queuedSaveSilent = true;
+    var lastSavedSignature = '';
+    var lastSubmittedSignature = '';
 
     function nextMcpId(prefix) {
       mcpState.nextId += 1;
@@ -155,11 +174,11 @@
       modelIssueCard.classList.toggle('hidden', !hasIssue);
       if (!hasIssue) {
         modelIssueText.textContent = 'Текущая chat-модель недоступна.';
-        modelIssueMeta.textContent = 'Выберите модель из списка и сохраните настройки.';
+        modelIssueMeta.textContent = 'Выберите модель из списка, она сохранится автоматически.';
         return;
       }
       modelIssueText.textContent = issue.message || 'Текущая chat-модель недоступна.';
-      modelIssueMeta.textContent = issue.detail || 'Выберите модель из списка и сохраните настройки.';
+      modelIssueMeta.textContent = issue.detail || 'Выберите модель из списка, она сохранится автоматически.';
     }
 
     function buildCurrentChatModelIssue() {
@@ -172,7 +191,7 @@
       }
       return {
         message: 'Модель "' + currentModel + '" не найдена в списке доступных моделей. Нужно выбрать chat-модель из списка.',
-        detail: 'Список моделей успешно загружен, но текущей chat-модели там нет. Выберите модель в разделе «Модели» и сохраните настройки.'
+        detail: 'Список моделей успешно загружен, но текущей chat-модели там нет. Выберите модель в разделе «Модели», она сохранится автоматически.'
       };
     }
 
@@ -192,7 +211,11 @@
         systemPrompt: sSystemPrompt ? String(sSystemPrompt.value || '').trim() : '',
         jiraBaseUrl: sJiraBaseUrl ? sJiraBaseUrl.value.trim() : '',
         jiraUsername: sJiraUsername ? sJiraUsername.value.trim() : '',
-        jiraPassword: sJiraPassword ? sJiraPassword.value.trim() : ''
+        jiraPassword: sJiraPassword ? sJiraPassword.value.trim() : '',
+        tfsBaseUrl: sTfsBaseUrl ? sTfsBaseUrl.value.trim() : '',
+        tfsCollection: sTfsCollection ? sTfsCollection.value.trim() : '',
+        tfsUsername: sTfsUsername ? sTfsUsername.value.trim() : '',
+        tfsPassword: sTfsPassword ? sTfsPassword.value.trim() : ''
       };
     }
 
@@ -345,6 +368,7 @@
       container.appendChild(trigger);
 
       function select(value) {
+        var changed = pickerValues[key] !== value;
         pickerValues[key] = value;
         if (value) {
           triggerText.textContent = value;
@@ -354,6 +378,14 @@
           trigger.classList.add('placeholder');
         }
         close();
+        if (changed) {
+          if (key === 'chat') {
+            var issue = buildCurrentChatModelIssue();
+            renderModelIssue(issue);
+            if (pChat && pChat.setWarning) pChat.setWarning(issue ? issue.message : '');
+          }
+          scheduleAutoSave('Модель изменена, сохраняю автоматически.', 'idle');
+        }
       }
 
       function position() {
@@ -843,7 +875,6 @@
     function renderMcpDraftState() {
       if (!mcpStatusDot || !mcpStatusText || !mcpStatusCard) return;
 
-      var configPath = sMcpConfigPath ? sMcpConfigPath.value.trim() : '';
       var serialized = serializeMcpServers();
       var state = 'idle';
       var text = 'Можно оставить MCP пустым.';
@@ -852,21 +883,12 @@
         state = 'err';
         text = 'MCP-конфиг пока некорректен.';
       } else {
-        var effectivePath = configPath || (serialized.count > 0 ? '.mcp.json' : '');
-
         if (mcpState.loadError) {
           state = 'err';
-          text = 'MCP-файл прочитан с ошибкой. Сохранение его перезапишет.';
+          text = 'MCP-настройки пока некорректны.';
         } else if (serialized.count > 0) {
           state = 'ok';
-          text = mcpState.configExists
-            ? 'Серверов: ' + serialized.count + '. Файл ' + (effectivePath || mcpState.sourceLabel || '.mcp.json') + ' будет обновлён.'
-            : 'Серверов: ' + serialized.count + '. Будет создан файл ' + (effectivePath || '.mcp.json') + '.';
-        } else if (isNonEmptyText(configPath)) {
-          state = 'idle';
-          text = 'Путь задан, серверов пока нет.';
-        } else if (mcpState.source === 'workspace-file') {
-          text = 'MCP загружен из файла.';
+          text = 'Серверов: ' + serialized.count + '. Будут сохранены в настройках расширения.';
         }
       }
 
@@ -959,7 +981,7 @@
 
     function markWebTrustDirty(message, tone) {
       renderWebTrustState();
-      setSaveStatus(message || 'Есть несохранённые web-fetch изменения.', tone || 'idle');
+      scheduleAutoSave(message || 'Web-fetch настройки изменены, сохраняю автоматически.', tone || 'idle');
     }
 
     function setJiraStatus(state, text, meta) {
@@ -1035,6 +1057,84 @@
       setSaveStatus('Jira проверена.', 'ok');
     }
 
+    function setTfsStatus(state, text, meta) {
+      if (!tfsStatusCard || !tfsStatusDot || !tfsStatusText || !tfsStatusMeta) return;
+      tfsStatusDot.className = 'conn-dot ' + state;
+      tfsStatusText.textContent = text || '';
+      tfsStatusMeta.textContent = meta || '';
+      tfsStatusCard.className = 'settings-status-card is-compact' + (state === 'ok' ? ' is-ok' : state === 'err' ? ' is-err' : '');
+    }
+
+    function renderTfsProjects(projects) {
+      if (!tfsProjectList) return;
+      var rows = Array.isArray(projects)
+        ? projects.filter(function (project) {
+            var tasks = Array.isArray(project.tasks) ? project.tasks : [];
+            return tasks.length || (Number(project.taskCount) || 0) > 0;
+          })
+        : [];
+      if (!rows.length) {
+        tfsProjectList.innerHTML = '';
+        return;
+      }
+      tfsProjectList.innerHTML = rows.map(function (project) {
+        var title = String(project.name || project.key || '');
+        var count = Number(project.taskCount) || 0;
+        var tasks = Array.isArray(project.tasks) ? project.tasks : [];
+        var taskRows = tasks.map(function (task) {
+          var taskTitle = '#' + String(task.id || task.key || '') + (task.title ? ' • ' + String(task.title) : '');
+          var description = String(task.description || '').trim();
+          var meta = [task.type, task.status, task.projectName].filter(Boolean).join(' • ');
+          return '' +
+            '<div class="jira-task-row" title="' + escapeHtml(task.url || '') + '">' +
+              '<div class="jira-task-title">' + escapeHtml(taskTitle) + '</div>' +
+              '<div class="jira-task-description' + (description ? '' : ' is-empty') + '">' +
+                escapeHtml(description || 'Описание не заполнено.') +
+              '</div>' +
+              '<div class="jira-task-url">' + escapeHtml(meta || task.url || '') + '</div>' +
+            '</div>';
+        }).join('');
+        var taskList = taskRows
+          ? '<div class="jira-task-list">' + taskRows + '</div>'
+          : '<div class="jira-task-empty">Work items в проекте не загружены.</div>';
+        return '' +
+          '<div class="jira-project-row" title="' + escapeHtml(project.url || '') + '">' +
+            '<div class="jira-project-head">' +
+              '<div>' +
+                '<div class="jira-project-title">' + escapeHtml(title) + '</div>' +
+                '<div class="jira-project-meta">' + escapeHtml(project.description || project.url || '') + '</div>' +
+              '</div>' +
+              '<div class="jira-project-count">' + escapeHtml(String(count)) + '</div>' +
+            '</div>' +
+            taskList +
+          '</div>';
+      }).join('');
+    }
+
+    function handleTfsCheckResult(msg) {
+      if (tfsCheckBtn) {
+        tfsCheckBtn.disabled = false;
+        tfsCheckBtn.textContent = 'Проверить TFS';
+      }
+      if (!msg || !msg.ok) {
+        setTfsStatus('err', 'TFS не прошёл проверку', (msg && msg.error) || 'Ошибка подключения или авторизации.');
+        renderTfsProjects([]);
+        setSaveStatus('TFS не прошёл проверку.', 'error');
+        return;
+      }
+      setTfsStatus(
+        'ok',
+        'Авторизация TFS успешна: ' + (msg.authUser || 'пользователь определён'),
+        'Коллекция: ' + (msg.collection || 'DefaultCollection') +
+          ' • проектов: ' + String(msg.projectsCount || 0) +
+          ' • work items пользователя: ' + String(msg.totalTasks || 0) +
+          (msg.effectiveUsername ? ' • login: ' + msg.effectiveUsername : '') +
+          (msg.warning ? ' • ' + msg.warning : '')
+      );
+      renderTfsProjects(msg.projects || []);
+      setSaveStatus('TFS проверен.', 'ok');
+    }
+
     function collectSettingsPayload(options) {
       var payload = buildBasePayload();
       payload.mcpDisabledTools = mcpState.disabledTools.slice();
@@ -1050,12 +1150,107 @@
         return { ok: false, error: serialized.error };
       }
 
-      payload.mcpConfigPath = sMcpConfigPath ? sMcpConfigPath.value.trim() : '';
+      payload.mcpConfigPath = '';
       payload.mcpServers = serialized.value || {};
       return { ok: true, payload: payload };
     }
 
+    function stringifySettingsPayload(payload) {
+      try {
+        return JSON.stringify(payload || {});
+      } catch (_) {
+        return '';
+      }
+    }
+
+    function setSaveButtonSaving(saving) {
+      if (!saveBtn) return;
+      saveBtn.disabled = !!saving;
+      saveBtn.textContent = saving ? '...' : 'Сохранить сейчас';
+    }
+
+    function submitSettingsSave(silent) {
+      if (autoSaveTimer) {
+        clearTimeout(autoSaveTimer);
+        autoSaveTimer = null;
+      }
+
+      var collected = collectSettingsPayload();
+      if (!collected.ok) {
+        renderMcpDraftState();
+        setSaveButtonSaving(false);
+        setSaveStatus(
+          (silent ? 'Автосохранение ждёт: ' : '') + (collected.error || 'Исправьте настройки перед сохранением.'),
+          'error'
+        );
+        if (!silent) showToast(collected.error || 'Исправьте настройки перед сохранением');
+        return;
+      }
+
+      var signature = stringifySettingsPayload(collected.payload);
+      if (signature && signature === lastSavedSignature && !saveInFlight) {
+        setSaveButtonSaving(false);
+        setSaveStatus('Настройки уже сохранены.', 'ok');
+        return;
+      }
+
+      if (saveInFlight) {
+        saveQueued = true;
+        queuedSaveSilent = queuedSaveSilent && !!silent;
+        setSaveStatus('Сохранение идёт, новые изменения поставлены в очередь.', 'pending');
+        return;
+      }
+
+      saveInFlight = true;
+      queuedSaveSilent = true;
+      lastSubmittedSignature = signature;
+      setSaveButtonSaving(true);
+      setSaveStatus(silent ? 'Сохраняю автоматически...' : 'Сохраняю настройки...', 'pending');
+      vscode.postMessage({ type: 'saveSettings', data: collected.payload, silent: !!silent });
+    }
+
+    function scheduleAutoSave(message, tone) {
+      if (isApplyingSettingsData) return;
+      if (message) {
+        setSaveStatus(message, tone || 'idle');
+      }
+      if (autoSaveTimer) clearTimeout(autoSaveTimer);
+      autoSaveTimer = setTimeout(function () {
+        autoSaveTimer = null;
+        submitSettingsSave(true);
+      }, AUTO_SAVE_DELAY_MS);
+    }
+
+    function handleSettingsSaveFinished(msg) {
+      var failed = msg && msg.ok === false;
+      var nextSaveQueued = saveQueued;
+      var nextSaveSilent = queuedSaveSilent;
+      saveInFlight = false;
+      saveQueued = false;
+      queuedSaveSilent = true;
+      setSaveButtonSaving(false);
+
+      if (failed) {
+        lastSubmittedSignature = '';
+        setSaveStatus((msg && msg.error) || 'Не удалось сохранить настройки.', 'error');
+        if (!(msg && msg.silent)) showToast((msg && msg.error) || 'Не удалось сохранить настройки');
+        if (nextSaveQueued) submitSettingsSave(nextSaveSilent);
+        return;
+      }
+
+      if (lastSubmittedSignature) {
+        lastSavedSignature = lastSubmittedSignature;
+      }
+      lastSubmittedSignature = '';
+      renderMcpDraftState();
+      renderWebTrustState();
+      setSaveStatus(msg && msg.silent ? 'Сохранено автоматически.' : 'Настройки сохранены.', 'ok');
+      if (!(msg && msg.silent)) showToast('Настройки сохранены');
+      if (nextSaveQueued) submitSettingsSave(nextSaveSilent);
+    }
+
     function updateSettingsData(data) {
+      isApplyingSettingsData = true;
       var modelIssue = data.modelSelectionIssue || null;
       sApiBaseUrl.value = data.apiBaseUrl || '';
       sApiKey.value = data.apiKey || '';
@@ -1063,7 +1258,10 @@
       if (sJiraBaseUrl) sJiraBaseUrl.value = data.jiraBaseUrl || '';
       if (sJiraUsername) sJiraUsername.value = data.jiraUsername || '';
       if (sJiraPassword) sJiraPassword.value = data.jiraPassword || '';
-      if (sMcpConfigPath) sMcpConfigPath.value = data.mcpConfigPath || '';
+      if (sTfsBaseUrl) sTfsBaseUrl.value = data.tfsBaseUrl || '';
+      if (sTfsCollection) sTfsCollection.value = data.tfsCollection || 'DefaultCollection';
+      if (sTfsUsername) sTfsUsername.value = data.tfsUsername || '';
+      if (sTfsPassword) sTfsPassword.value = data.tfsPassword || '';
       modelsList = Array.isArray(data.models) ? data.models : [];
       pickerValues.chat = data.model || '';
       pickerValues.rerank = data.rerankModel || '';
@@ -1090,10 +1288,15 @@
       renderMcpInspectionState();
       setSaveStatus(
         mcpState.loadError
-          ? 'MCP-файл прочитан с ошибкой. Можно поправить поля и сохранить заново.'
+          ? 'MCP-настройки прочитаны с ошибкой. Можно поправить поля и сохранить заново.'
           : 'Настройки загружены.',
         mcpState.loadError ? 'error' : 'idle'
       );
+      isApplyingSettingsData = false;
+      var loaded = collectSettingsPayload();
+      if (loaded.ok) {
+        lastSavedSignature = stringifySettingsPayload(loaded.payload);
+      }
     }
 
     function handleConnectionResult(msg) {
@@ -1120,7 +1323,7 @@
     function markMcpDirty(message, tone) {
       renderMcpDraftState();
       renderMcpInspectionState();
-      setSaveStatus(message || 'Есть несохранённые MCP-изменения.', tone || 'idle');
+      scheduleAutoSave(message || 'MCP-настройки изменены, сохраняю автоматически.', tone || 'idle');
     }
 
     function renderMcpInspectionState() {
@@ -1236,7 +1439,7 @@
 
         if (target.dataset.field) {
           server[target.dataset.field] = target.value;
-          markMcpDirty('Есть несохранённые MCP-изменения.', 'idle');
+          markMcpDirty('MCP-настройки изменены, сохраняю автоматически.', 'idle');
           return;
         }
 
@@ -1244,7 +1447,7 @@
           var row = findCollectionRow(server[target.dataset.collection] || [], target.dataset.rowId);
           if (!row) return;
           row[target.dataset.part || 'value'] = target.value;
-          markMcpDirty('Есть несохранённые MCP-изменения.', 'idle');
+          markMcpDirty('MCP-настройки изменены, сохраняю автоматически.', 'idle');
         }
       });
 
@@ -1281,8 +1484,8 @@
           renderMcpInspectionState();
           markMcpDirty(
             enabled
-              ? 'MCP tool включён. Не забудь сохранить настройки.'
-              : 'MCP tool выключен. Не забудь сохранить настройки.',
+              ? 'MCP tool включён, сохраняю автоматически.'
+              : 'MCP tool выключен, сохраняю автоматически.',
             'idle'
           );
         });
@@ -1308,7 +1511,7 @@
           var row = findHostDraft(webTrustState.trustedHosts, target.dataset.rowId);
           if (!row) return;
           row.value = target.value;
-          markWebTrustDirty('Есть несохранённые web-fetch изменения.', 'idle');
+          markWebTrustDirty('Web-fetch настройки изменены, сохраняю автоматически.', 'idle');
         });
       }
 
@@ -1330,7 +1533,7 @@
           var row = findHostDraft(webTrustState.blockedHosts, target.dataset.rowId);
           if (!row) return;
           row.value = target.value;
-          markWebTrustDirty('Есть несохранённые web-fetch изменения.', 'idle');
+          markWebTrustDirty('Web-fetch настройки изменены, сохраняю автоматически.', 'idle');
         });
       }
     }
@@ -1355,12 +1558,39 @@
         });
       }
 
+      if (toggleTfsPasswordBtn && sTfsPassword) {
+        toggleTfsPasswordBtn.addEventListener('click', function () {
+          var hidden = sTfsPassword.type === 'password';
+          sTfsPassword.type = hidden ? 'text' : 'password';
+          toggleTfsPasswordBtn.innerHTML = hidden ? '&#128274;' : '&#128065;';
+        });
+      }
+
+      [sApiBaseUrl, sApiKey, sSystemPrompt].forEach(function (input) {
+        if (!input) return;
+        input.addEventListener('input', function () {
+          if (input === sApiBaseUrl || input === sApiKey) {
+            setConnStatus('idle', 'Подключение изменено.');
+          }
+          scheduleAutoSave('Настройки изменены, сохраняю автоматически.', 'idle');
+        });
+      });
+
       [sJiraBaseUrl, sJiraUsername, sJiraPassword].forEach(function (input) {
         if (!input) return;
         input.addEventListener('input', function () {
-          setSaveStatus('Есть несохранённые Jira-настройки.', 'idle');
           setJiraStatus('idle', 'Jira ещё не проверялась.', 'Проверка покажет пользователя, количество проектов и задачи пользователя с названием и описанием.');
           renderJiraProjects([]);
+          scheduleAutoSave('Jira-настройки изменены, сохраняю автоматически.', 'idle');
+        });
+      });
+
+      [sTfsBaseUrl, sTfsCollection, sTfsUsername, sTfsPassword].forEach(function (input) {
+        if (!input) return;
+        input.addEventListener('input', function () {
+          setTfsStatus('idle', 'TFS ещё не проверялся.', 'Проверка покажет пользователя, коллекцию, количество проектов и work items пользователя.');
+          renderTfsProjects([]);
+          scheduleAutoSave('TFS-настройки изменены, сохраняю автоматически.', 'idle');
         });
       });
 
@@ -1371,6 +1601,16 @@
           setJiraStatus('loading', 'Проверяю авторизацию Jira...', 'Загружаю задачи пользователя, названия и описания.');
           renderJiraProjects([]);
           vscode.postMessage({ type: 'checkJira', data: buildBasePayload() });
+        });
+      }
+
+      if (tfsCheckBtn) {
+        tfsCheckBtn.addEventListener('click', function () {
+          tfsCheckBtn.disabled = true;
+          tfsCheckBtn.textContent = 'Проверяю...';
+          setTfsStatus('loading', 'Проверяю авторизацию TFS...', 'Загружаю проекты и work items пользователя через WIQL.');
+          renderTfsProjects([]);
+          vscode.postMessage({ type: 'checkTfs', data: buildBasePayload() });
         });
       }
 
@@ -1385,29 +1625,18 @@
         renderModelTests(buildModelTestEntries('pending'), 'Проверяю выбранные модели отдельными запросами.');
       });
 
-      saveBtn.addEventListener('click', function () {
-        var collected = collectSettingsPayload();
-        if (!collected.ok) {
-          renderMcpDraftState();
-          setSaveStatus(collected.error || 'Исправьте MCP-конфиг перед сохранением.', 'error');
-          showToast('Исправьте MCP-конфиг перед сохранением');
-          return;
-        }
-        saveBtn.disabled = true;
-        saveBtn.textContent = '...';
-        setSaveStatus('Сохраняю настройки и MCP-конфиг...', 'pending');
-        vscode.postMessage({ type: 'saveSettings', data: collected.payload });
-      });
-
-      cancelBtn.addEventListener('click', function () {
-        onCancel();
-      });
-
-      if (sMcpConfigPath) {
-        sMcpConfigPath.addEventListener('input', function () {
-          markMcpDirty('Есть несохранённые MCP-изменения.', 'idle');
+      if (saveBtn) {
+        saveBtn.addEventListener('click', function () {
+          submitSettingsSave(false);
         });
       }
+
+      cancelBtn.addEventListener('click', function () {
+        if (autoSaveTimer) {
+          submitSettingsSave(true);
+        }
+        onCancel();
+      });
 
       if (mcpAddStdioBtn) {
         mcpAddStdioBtn.addEventListener('click', function () {
@@ -1499,6 +1728,12 @@
         if (event.target && allDropdowns.some(function (dropdown) { return dropdown.contains(event.target); })) return;
         openPicker();
       }, true);
+
+      window.addEventListener('beforeunload', function () {
+        if (autoSaveTimer) {
+          submitSettingsSave(true);
+        }
+      });
     }
 
     renderModelTests([], 'Выберите модели и нажмите «Проверить».');
@@ -1533,28 +1768,9 @@
         setSaveStatus(msg.summary || 'Проверка MCP завершена.', msg.ok ? 'ok' : 'error');
       },
       handleJiraCheckResult: handleJiraCheckResult,
+      handleTfsCheckResult: handleTfsCheckResult,
       handleSettingsSaved: function (msg) {
-        saveBtn.disabled = false;
-        saveBtn.textContent = 'Сохранить';
-        if (msg && msg.mcpSavedPath) {
-          if (sMcpConfigPath) sMcpConfigPath.value = msg.mcpSavedPath;
-          mcpState.source = 'workspace-file';
-          mcpState.sourceLabel = msg.mcpSavedPath;
-          mcpState.configExists = true;
-          mcpState.loadError = '';
-          renderMcpDraftState();
-          setSaveStatus(
-            msg.mcpCreatedFile
-              ? 'Настройки сохранены. MCP config создан: ' + msg.mcpSavedPath
-              : 'Настройки сохранены. MCP config обновлён: ' + msg.mcpSavedPath,
-            'ok'
-          );
-        } else {
-          renderMcpDraftState();
-          setSaveStatus('Настройки сохранены.', 'ok');
-        }
-        renderWebTrustState();
-        showToast('Настройки сохранены');
+        handleSettingsSaveFinished(msg || {});
       }
     };
   }

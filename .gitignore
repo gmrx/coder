@@ -11,6 +11,18 @@ dist/
 Thumbs.db
 
 .vscode-test/
+.vscode/settings.json
+
+*.log
+*.tsbuildinfo
+coverage/
+.nyc_output/
+
 srctempagent/
 .cursorcoder/tasks/
 .cursorcoder/session-memory/
+.mcp.json
+.cursor/mcp.json
+resources/telemetry/
+
+clickgraf/

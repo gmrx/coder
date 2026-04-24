@@ -20,6 +20,7 @@ import {
 } from './modelSelectionIssue';
 import type { WebviewMessageSink } from './protocol/messages';
 import type { PersistedTraceRun, TraceEventPayload } from './protocol/trace';
+import type { ChatRunTelemetrySignal } from '../telemetry/types';
 
 interface ChatRunControllerOptions {
   chatHistory: ChatMessage[];
@@ -35,6 +36,7 @@ interface ChatRunControllerOptions {
   cancelQuestion: (confirmId: string, reason?: string) => void;
   persistConversation: () => void | Promise<void>;
   openSettingsPanel: (request?: SettingsPanelRequest) => void;
+  recordTelemetry?: (signal: ChatRunTelemetrySignal) => void;
 }
 
 type ActiveRunAction = {
@@ -56,6 +58,7 @@ export class ChatRunController {
   private followupSummary = 'Быстрые действия для старта работы с проектом.';
   private traceRuns: PersistedTraceRun[] = [];
   private activeTraceRun: PersistedTraceRun | null = null;
+  private lastTraceRunId: string | null = null;
   private tracePersistTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private readonly options: ChatRunControllerOptions) {}
@@ -111,11 +114,13 @@ export class ChatRunController {
     this.options.chatHistory.push({ role: 'user', content: text });
     void this.options.persistConversation();
     this.setFollowupState('waiting', 'Сначала отвечаю на запрос. Затем подберу следующие шаги.');
-    this.startTraceRun();
+    const runId = this.startTraceRun();
     this.options.post({ type: 'traceReset' });
 
     const config = readConfig();
+    this.options.recordTelemetry?.({ kind: 'run-started', runId, model: config.model || '' });
     if (!isConfigValid(config)) {
+      this.finishTraceRunWithTelemetry('error', 'Настройки модели не заполнены.', config.model || '');
       this.options.openSettingsPanel({ section: 'models' });
       this.setFollowupState(
         this.followupSuggestions.length > 0 ? 'ready' : 'error',
@@ -132,6 +137,7 @@ export class ChatRunController {
       data: { model: config.model },
     });
     this.recordTraceEvent('agent-model', config.model ? `Модель: ${config.model}` : '', { model: config.model });
+    this.recordTelemetryTraceEvent('agent-model', config.model ? `Модель: ${config.model}` : '', { model: config.model });
 
     const checkpoint = await this.options.checkpointController.createCheckpoint(text);
     this.options.post({
@@ -189,7 +195,20 @@ export class ChatRunController {
                   detail: buildAutoApprovalDetail(approvalRequest),
                   autoApproved: true,
                 });
-                return Promise.resolve(buildAutoApprovedResult(approvalRequest));
+                this.recordTelemetryTraceEvent(phase, message, {
+                  ...meta,
+                  summary: buildAutoApprovalSummary(approvalRequest),
+                  detail: buildAutoApprovalDetail(approvalRequest),
+                  autoApproved: true,
+                });
+                const autoApprovedResult = buildAutoApprovedResult(approvalRequest);
+                this.options.recordTelemetry?.({
+                  kind: 'auto-approval',
+                  runId,
+                  request: approvalRequest,
+                  result: autoApprovedResult,
+                });
+                return Promise.resolve(autoApprovedResult);
               }
 
               this.activeAction = {
@@ -200,6 +219,7 @@ export class ChatRunController {
               };
               this.options.post({ type: 'traceEvent', phase, text: message, data: meta || {} });
               this.recordTraceEvent(phase, message, meta || {});
+              this.recordTelemetryTraceEvent(phase, message, meta || {});
               this.options.getAgentEngine().setPendingApproval(meta as AgentApprovalRequest);
               this.activeApprovalConfirmId = meta.confirmId;
               return this.options.requestApproval(meta as AgentApprovalRequest).finally(() => {
@@ -219,6 +239,7 @@ export class ChatRunController {
               };
               this.options.post({ type: 'traceEvent', phase, text: message, data: meta || {} });
               this.recordTraceEvent(phase, message, meta || {});
+              this.recordTelemetryTraceEvent(phase, message, meta || {});
               this.options.getAgentEngine().setPendingQuestion(meta as AgentQuestionRequest);
               this.activeQuestionConfirmId = meta.confirmId;
               return this.options.requestQuestion(meta as AgentQuestionRequest).finally(() => {
@@ -259,6 +280,7 @@ export class ChatRunController {
 
             this.options.post({ type: 'traceEvent', phase, text: message, data: meta || {} });
             this.recordTraceEvent(phase, message, meta || {});
+            this.recordTelemetryTraceEvent(phase, message, meta || {});
           },
           signal: abortController.signal,
         },
@@ -283,13 +305,14 @@ export class ChatRunController {
       } else if (finalTraceState === 'stopped') {
         checkpointStatus = 'stopped';
       }
-      this.finishTraceRun(
+      this.finishTraceRunWithTelemetry(
         finalTraceState,
         finalTraceState === 'done'
           ? 'Готово.'
           : finalTraceState === 'error'
             ? 'Во время выполнения возникла ошибка.'
             : 'Остановлено.',
+        config.model || '',
       );
       this.options.post({ type: 'assistant', text: answer });
 
@@ -300,7 +323,11 @@ export class ChatRunController {
       }
     } catch (error: any) {
       checkpointStatus = abortController.signal.aborted ? 'stopped' : 'failed';
-      this.finishTraceRun(abortController.signal.aborted ? 'stopped' : 'error', abortController.signal.aborted ? 'Остановлено.' : 'Во время выполнения возникла ошибка.');
+      this.finishTraceRunWithTelemetry(
+        abortController.signal.aborted ? 'stopped' : 'error',
+        abortController.signal.aborted ? 'Остановлено.' : 'Во время выполнения возникла ошибка.',
+        config.model || '',
+      );
       if (!abortController.signal.aborted) {
         const issue = this.handleModelSelectionIssue(error?.message || String(error), config);
         if (issue) {
@@ -421,10 +448,15 @@ export class ChatRunController {
     this.followupSummary = snapshot.suggestionsSummary || 'Быстрые действия для старта работы с проектом.';
     this.traceRuns = cloneTraceRuns(Array.isArray(snapshot.traceRuns) ? snapshot.traceRuns : []);
     this.activeTraceRun = null;
+    this.lastTraceRunId = this.traceRuns.length > 0 ? this.traceRuns[this.traceRuns.length - 1].id : null;
   }
 
   public getActiveTraceRunId(): string | null {
     return this.activeTraceRun?.id || null;
+  }
+
+  public getLatestTraceRunId(): string | null {
+    return this.activeTraceRun?.id || this.lastTraceRunId;
   }
 
   private async generateSuggestions(
@@ -497,18 +529,20 @@ export class ChatRunController {
     });
   }
 
-  private startTraceRun(): void {
+  private startTraceRun(): string {
     this.activeTraceRun = {
       id: `run-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       state: 'stopped',
       summary: '',
       events: [],
     };
+    this.lastTraceRunId = this.activeTraceRun.id;
     this.traceRuns.push(this.activeTraceRun);
     if (this.traceRuns.length > 24) {
       this.traceRuns = this.traceRuns.slice(-24);
     }
     this.schedulePersistConversation();
+    return this.activeTraceRun.id;
   }
 
   private recordTraceEvent(phase: string, text: string, data: Record<string, any>): void {
@@ -527,10 +561,42 @@ export class ChatRunController {
 
   private finishTraceRun(state: PersistedTraceRun['state'], summary: string): void {
     if (!this.activeTraceRun) return;
+    this.lastTraceRunId = this.activeTraceRun.id;
     this.activeTraceRun.state = state;
     this.activeTraceRun.summary = summary;
     this.activeTraceRun = null;
     this.schedulePersistConversation();
+  }
+
+  private finishTraceRunWithTelemetry(
+    state: PersistedTraceRun['state'],
+    summary: string,
+    model: string,
+  ): void {
+    const runId = this.activeTraceRun?.id || '';
+    this.finishTraceRun(state, summary);
+    if (!runId) return;
+    this.options.recordTelemetry?.({
+      kind: 'run-finished',
+      runId,
+      state,
+      summary,
+      model,
+    });
+  }
+
+  private recordTelemetryTraceEvent(phase: string, text: string, data: Record<string, any>): void {
+    const runId = this.activeTraceRun?.id || '';
+    if (!runId) return;
+    this.options.recordTelemetry?.({
+      kind: 'trace',
+      trace: {
+        runId,
+        phase,
+        text,
+        data,
+      },
+    });
   }
 
   private schedulePersistConversation(): void {

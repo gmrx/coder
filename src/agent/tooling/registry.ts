@@ -9,6 +9,7 @@ import { jiraToolHandlers } from './handlers/jiraTools';
 import { mcpToolHandlers } from './handlers/mcpTools';
 import { projectToolHandlers } from './handlers/projectTools';
 import { taskToolHandlers } from './handlers/taskTools';
+import { tfsToolHandlers } from './handlers/tfsTools';
 import { worktreeToolHandlers } from './handlers/worktreeTools';
 
 export function createToolHandlers(
@@ -22,6 +23,7 @@ export function createToolHandlers(
     ...editToolHandlers,
     ...externalToolHandlers,
     ...jiraToolHandlers,
+    ...tfsToolHandlers,
     ...mcpToolHandlers,
     ...taskToolHandlers,
     ...worktreeToolHandlers,

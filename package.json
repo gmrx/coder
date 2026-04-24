@@ -2,7 +2,7 @@
   "name": "coder",
   "displayName": "ИИ Кодогенератор",
   "description": "ИИ-кодогенератор для VS Code с агентным циклом и поддержкой любого LLM API.",
-  "version": "0.0.272",
+  "version": "0.0.285",
   "author": "Мартин Газов (gmrx)",
   "publisher": "gmrx",
   "license": "SEE LICENSE IN LICENSE",
@@ -152,15 +152,35 @@
           "default": "",
           "markdownDescription": "Пароль или персональный токен для Jira. **Не коммитьте его в git!**"
         },
+        "aiAssistant.tfsBaseUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Базовый URL TFS-сервера, например http://server:8080/tfs."
+        },
+        "aiAssistant.tfsCollection": {
+          "type": "string",
+          "default": "DefaultCollection",
+          "description": "Коллекция проектов TFS."
+        },
+        "aiAssistant.tfsUsername": {
+          "type": "string",
+          "default": "",
+          "description": "Логин для чтения проектов и work items из TFS. Можно указать DOMAIN\\\\login."
+        },
+        "aiAssistant.tfsPassword": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Пароль для TFS. **Не коммитьте его в git!**"
+        },
         "aiAssistant.mcpConfigPath": {
           "type": "string",
           "default": "",
-          "description": "Необязательный путь к MCP config JSON. Если пусто, расширение ищет .mcp.json и .cursor/mcp.json в корне workspace."
+          "description": "Устаревшее поле. MCP сохраняется во внутреннем хранилище расширения, без файлов в workspace."
         },
         "aiAssistant.mcpServers": {
           "type": "object",
           "default": {},
-          "markdownDescription": "Необязательная карта MCP серверов. Формат совместим с `mcpServers` в `.mcp.json`. Сейчас поддерживаются `stdio` и `http`."
+          "markdownDescription": "Необязательная карта MCP серверов. Сохраняется во внутреннем хранилище расширения, без файлов в workspace. Сейчас поддерживаются `stdio` и `http`."
         },
         "aiAssistant.mcpDisabledTools": {
           "type": "array",
@@ -214,6 +234,7 @@
     "vscode:prepublish": "npm run build",
     "clean": "rm -rf dist",
     "build": "npm run clean && tsc -p ./",
+    "test": "npm run build && node --test dist/core/modelClient.test.js dist/telemetry/*.test.js",
     "watch": "tsc -watch -p ./",
     "lint": "echo \"no lint configured\"",
     "bump-version": "npm version patch --no-git-tag-version",

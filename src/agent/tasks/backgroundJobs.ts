@@ -1,8 +1,11 @@
 import * as path from 'path';
 import { spawn } from 'child_process';
+import { getExtensionStoragePath } from '../../core/extensionStorage';
 import {
   buildBackgroundShellTaskSubject,
   createTaskRecord,
+  getTaskStderrPath,
+  getTaskStdoutPath,
   patchTaskRecord,
   toTaskWorkspaceRelativePath,
   type AgentTaskRecord,
@@ -28,8 +31,8 @@ export async function startBackgroundShellJob(input: {
     },
     rootPath,
   );
-  const stdoutPath = path.join(rootPath, '.cursorcoder/tasks', task.id, 'stdout.log');
-  const stderrPath = path.join(rootPath, '.cursorcoder/tasks', task.id, 'stderr.log');
+  const stdoutPath = getTaskStdoutPath(task.id, rootPath);
+  const stderrPath = getTaskStderrPath(task.id, rootPath);
   const actualTask = await patchTaskRecord(
     task.id,
     {
@@ -44,9 +47,14 @@ export async function startBackgroundShellJob(input: {
   }
 
   const runnerPath = path.resolve(__dirname, '../tasks/taskRunner.js');
+  const runnerArgs = [runnerPath, '--root', rootPath, '--task', actualTask.id];
+  const storagePath = getExtensionStoragePath();
+  if (storagePath) {
+    runnerArgs.push('--storage', storagePath);
+  }
   const child = spawn(
     process.execPath,
-    [runnerPath, '--root', rootPath, '--task', actualTask.id],
+    runnerArgs,
     {
       cwd: rootPath,
       detached: true,

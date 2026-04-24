@@ -1,20 +1,32 @@
 import * as vscode from 'vscode';
+import { randomUUID } from 'crypto';
 import { ChatMessage } from './core/types';
 import { EXTENSION_NAME } from './core/constants';
+import { initExtensionStoragePath } from './core/extensionStorage';
 import { initConfigStorage, readConfig, sendChatRequest } from './core/api';
 import { isConfigValid, truncate } from './core/utils';
 import { AiChatViewProvider } from './ui/provider';
 import { AiOriginalContentProvider } from './ui/originalContentProvider';
 import { initMcpAuthStorage } from './agent/mcp/authStorage';
+import { CLICKHOUSE_METRICS_CONFIG } from './telemetry/clickhouseConfig';
+import { ClickHouseMetricsService } from './telemetry/clickhouseMetricsService';
 
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+
+const TELEMETRY_INSTALL_ID_KEY = 'aiAssistant.telemetry.installId';
 
 export function activate(context: vscode.ExtensionContext) {
   initConfigStorage(context.globalState);
   initMcpAuthStorage(context);
+  initExtensionStoragePath((context.storageUri || context.globalStorageUri)?.fsPath || '');
 
   const originalProvider = new AiOriginalContentProvider();
-  const chatProvider = new AiChatViewProvider(context, originalProvider);
+  const metricsService = new ClickHouseMetricsService({
+    installId: getOrCreateTelemetryInstallId(context),
+    storagePath: (context.storageUri || context.globalStorageUri)?.fsPath || '',
+    config: CLICKHOUSE_METRICS_CONFIG,
+  });
+  const chatProvider = new AiChatViewProvider(context, originalProvider, metricsService);
 
   const askCommand = vscode.commands.registerCommand('ai-assistant.ask', async () => {
     const editor = vscode.window.activeTextEditor;
@@ -101,6 +113,7 @@ export function activate(context: vscode.ExtensionContext) {
   });
 
   context.subscriptions.push(
+    metricsService,
     askCommand, configureCommand,
     vscode.workspace.registerTextDocumentContentProvider('ai-original', originalProvider),
     vscode.window.registerWebviewViewProvider(AiChatViewProvider.viewType, chatProvider),
@@ -109,3 +122,11 @@ export function activate(context: vscode.ExtensionContext) {
 }
 
 export function deactivate() {}
+
+function getOrCreateTelemetryInstallId(context: vscode.ExtensionContext): string {
+  const existing = String(context.globalState.get<string>(TELEMETRY_INSTALL_ID_KEY) || '').trim();
+  if (existing) return existing;
+  const generated = randomUUID();
+  void context.globalState.update(TELEMETRY_INSTALL_ID_KEY, generated);
+  return generated;
+}

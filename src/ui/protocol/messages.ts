@@ -29,6 +29,7 @@ import type {
   ModelTestsResultMessage,
   SettingsDataMessage,
   SettingsSavedMessage,
+  TfsCheckResultMessage,
 } from './settings';
 import type { TasksStateMessage } from './tasks';
 import type { TraceEventMessage, TraceResetMessage } from './trace';
@@ -152,6 +153,7 @@ export type ExtensionToWebviewMessage =
   | ModelTestsResultMessage
   | McpInspectionResultMessage
   | JiraCheckResultMessage
+  | TfsCheckResultMessage
   | TasksStateMessage
   | TraceResetMessage
   | TraceEventMessage
@@ -178,12 +180,17 @@ export type WebviewToExtensionMessage =
   | { type: 'switchConversation'; conversationId: string }
   | { type: 'deleteConversation'; conversationId: string }
   | { type: 'clearConversation' }
+  | { type: 'refreshTaskProjects' }
   | { type: 'refreshJiraProjects' }
+  | { type: 'refreshTfsProjects' }
+  | { type: 'selectTaskProject'; source?: 'free' | 'jira' | 'tfs'; projectKey?: string }
   | { type: 'selectJiraProject'; projectKey?: string }
-  | { type: 'saveSettings'; data?: SettingsRequestPayload }
+  | { type: 'selectTfsProject'; projectKey?: string }
+  | { type: 'saveSettings'; data?: SettingsRequestPayload; silent?: boolean }
   | { type: 'testConnection'; data?: SettingsRequestPayload }
   | { type: 'testModels'; data?: SettingsRequestPayload }
   | { type: 'checkJira'; data?: SettingsRequestPayload }
+  | { type: 'checkTfs'; data?: SettingsRequestPayload }
   | { type: 'inspectMcp'; data?: SettingsRequestPayload }
   | { type: 'refreshSuggestions' }
   | { type: 'acceptChange'; changeId: string }

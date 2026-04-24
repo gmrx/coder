@@ -69,5 +69,9 @@ export interface AssistantConfig {
   jiraBaseUrl: string;
   jiraUsername: string;
   jiraPassword: string;
+  tfsBaseUrl: string;
+  tfsCollection: string;
+  tfsUsername: string;
+  tfsPassword: string;
   autoApproval: AssistantAutoApprovalConfig;
 }
