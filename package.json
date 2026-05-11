@@ -249,7 +249,7 @@
   "dependencies": {
     "highlight.js": "^11.11.1",
     "markdown-it": "^14.1.1",
-    "mermaid": "^11.13.0",
+    "mermaid": "^11.15.0",
     "undici": "^6.25.0"
   },
   "overrides": {
